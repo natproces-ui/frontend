@@ -21,6 +21,10 @@ export default function Home() {
         updateDeposant,
         updateContact,
         regenerateDeposant,
+        addRepresentantLegal,
+        updateRepresentantLegal,
+        deleteRepresentantLegal,
+        regenerateRepresentantLegal,
         addHeritier,
         updateHeritier,
         deleteHeritier,
@@ -172,10 +176,15 @@ export default function Home() {
                                     <DeposantForm
                                         deposant={data.SCV.identifiantDeposant}
                                         contact={data.SCV.infosContact}
+                                        representantsLegaux={data.SCV.representantLegal}
                                         villes={refs.villes}
                                         onUpdateDeposant={updateDeposant}
                                         onUpdateContact={updateContact}
                                         onRegenerate={regenerateDeposant}
+                                        onAddRepresentant={addRepresentantLegal}
+                                        onUpdateRepresentant={updateRepresentantLegal}
+                                        onDeleteRepresentant={deleteRepresentantLegal}
+                                        onRegenerateRepresentant={regenerateRepresentantLegal}
                                     />
                                 </div>
                             )}

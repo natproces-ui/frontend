@@ -1,564 +1,356 @@
-// bpmnGenerator.ts
-export interface ProcessRow {
-    id: string;
-    service: string;
-    step: string;
-    task: string;
-    type: "Séquentielle" | "Conditionnelle";
-    condition: string;
-    yes: string;
-    no: string;
-}
+// bpmnGenerator.ts - VERSION OPTIMISÉE avec espacement intelligent
+import { BPMNLayoutEngine } from './bpmnLayoutEngine';
+import type { Table1Row, NodePosition } from './bpmnLayoutEngine';
 
-interface TaskPosition {
-    x: number;
-    y: number;
-    service: string;
-    laneIndex: number;
-}
+export { Table1Row };
 
 interface BPMNGeneratorConfig {
     laneHeight?: number;
-    taskWidth?: number;
-    taskHeight?: number;
-    taskSpacing?: number;
-    startX?: number;
-    startY?: number;
+    nodeWidth?: number;
+    nodeHeight?: number;
+    horizontalSpacing?: number;
+    gatewaySize?: number;
+    spacingMultiplier?: number; // 🆕 Contrôle de l'étalement (1.0 = compact, 1.5 = étendu, 2.0 = très étendu)
 }
 
 export class BPMNGenerator {
-    private config: Required<BPMNGeneratorConfig>;
-    private taskPositions: Map<string, TaskPosition>;
-    private serviceMap: Map<string, ProcessRow[]>;
-    private allSteps: Map<string, ProcessRow>;
-    private columnPositions: Map<string, number>;
+    private layoutEngine: BPMNLayoutEngine;
+    private positions: Map<string, NodePosition>;
+    private idMap: Map<string, Table1Row>;
+    private acteurMap: Map<string, Table1Row[]>;
+    private acteurs: string[];
+    private gatewaySize: number;
+    private nodeWidth: number;
+    private nodeHeight: number;
 
     constructor(config: BPMNGeneratorConfig = {}) {
-        this.config = {
-            laneHeight: config.laneHeight || 200,
-            taskWidth: config.taskWidth || 120,
-            taskHeight: config.taskHeight || 80,
-            taskSpacing: config.taskSpacing || 180,
-            startX: config.startX || 280,
-            startY: config.startY || 80
-        };
-        this.taskPositions = new Map();
-        this.serviceMap = new Map();
-        this.allSteps = new Map();
-        this.columnPositions = new Map();
+        // 🎯 Configuration optimisée pour un bon équilibre
+        this.gatewaySize = config.gatewaySize || 60;
+        this.nodeWidth = config.nodeWidth || 180;
+        this.nodeHeight = config.nodeHeight || 90;
+
+        const spacingMultiplier = config.spacingMultiplier || 1.3; // 🆕 30% plus d'espace par défaut
+
+        this.layoutEngine = new BPMNLayoutEngine({
+            laneHeight: config.laneHeight || 350,
+            nodeWidth: this.nodeWidth,
+            nodeHeight: this.nodeHeight,
+            horizontalSpacing: config.horizontalSpacing || 120,
+            compactMode: true, // 🆕 Mode compact activé
+            spacingMultiplier: spacingMultiplier // 🆕 Multiplicateur d'espacement
+        });
+
+        this.positions = new Map();
+        this.idMap = new Map();
+        this.acteurMap = new Map();
+        this.acteurs = [];
     }
 
-    /**
-     * Génère le XML BPMN complet à partir des données du processus
-     */
-    public generate(data: ProcessRow[]): string {
-        if (data.length === 0) {
-            throw new Error("Aucune donnée à générer");
-        }
+    public generate(data: Table1Row[]): string {
+        if (data.length === 0) throw new Error("Aucune donnée à générer");
 
-        // Initialiser les structures de données
-        this.groupByService(data);
-        this.buildStepMap(data);
-        this.calculateColumnPositions(data);
+        this.positions = this.layoutEngine.calculateLayout(data);
+        this.acteurs = this.layoutEngine.getActeurs();
+        this.buildMaps(data);
 
-        const services = Array.from(this.serviceMap.keys());
+        const lanesXML = this.generateLanes();
+        const { tasksXML, flowsXML } = this.generateTasksAndFlows(data);
+        const { shapesXML, edgesXML } = this.generateDiagram(data);
 
-        const lanesXML = this.generateLanes(services);
-        const { tasksXML, sequenceFlowsXML } = this.generateTasks(data, services);
-        const { shapesXML, edgesXML } = this.generateDiagram(services, data);
-
-        return this.buildXML(lanesXML, tasksXML, sequenceFlowsXML, shapesXML, edgesXML);
+        return this.buildXML(lanesXML, tasksXML, flowsXML, shapesXML, edgesXML);
     }
 
-    /**
-     * Groupe les tâches par service
-     */
-    private groupByService(data: ProcessRow[]): void {
-        this.serviceMap.clear();
+    private buildMaps(data: Table1Row[]): void {
+        this.idMap.clear();
+        this.acteurMap.clear();
+
         data.forEach(row => {
-            if (!this.serviceMap.has(row.service)) {
-                this.serviceMap.set(row.service, []);
+            this.idMap.set(row.id, row);
+            if (!this.acteurMap.has(row.acteur)) {
+                this.acteurMap.set(row.acteur, []);
             }
-            this.serviceMap.get(row.service)!.push(row);
+            this.acteurMap.get(row.acteur)!.push(row);
         });
     }
 
-    /**
-     * Construit une map de toutes les étapes pour un accès rapide
-     */
-    private buildStepMap(data: ProcessRow[]): void {
-        this.allSteps.clear();
-        data.forEach(row => {
-            this.allSteps.set(row.step, row);
-        });
-    }
-
-    /**
-     * Calcule les positions en colonnes pour chaque étape
-     */
-    private calculateColumnPositions(data: ProcessRow[]): void {
-        this.columnPositions.clear();
-
-        // Trier les étapes par ordre chronologique
-        const sortedSteps = data.slice().sort((a, b) => {
-            const [majorA, minorA] = a.step.split('.').map(Number);
-            const [majorB, minorB] = b.step.split('.').map(Number);
-            return majorA !== majorB ? majorA - majorB : minorA - minorB;
-        });
-
-        // Assigner une colonne à chaque étape
-        sortedSteps.forEach((row, index) => {
-            this.columnPositions.set(row.step, index);
-        });
-    }
-
-    /**
-     * Génère les lanes (couloirs) pour chaque service
-     */
-    private generateLanes(services: string[]): string {
+    private generateLanes(): string {
         let lanesXML = '';
 
-        services.forEach((service, serviceIndex) => {
-            const laneId = this.getLaneId(service);
-            const rows = this.serviceMap.get(service)!;
+        this.acteurs.forEach((acteur, index) => {
+            const laneId = this.getLaneId(acteur);
+            const rows = this.acteurMap.get(acteur)!;
 
             let flowNodeRefs = '';
 
-            // Ajouter Start dans la première lane
-            if (serviceIndex === 0) {
-                flowNodeRefs += `        <flowNodeRef>Start</flowNodeRef>\n`;
-            }
-
             rows.forEach(row => {
-                const taskId = this.getTaskId(row.step);
-                flowNodeRefs += `        <flowNodeRef>${taskId}</flowNodeRef>\n`;
-
-                if (row.type === "Conditionnelle") {
-                    const gatewayId = this.getGatewayId(row.step);
-                    flowNodeRefs += `        <flowNodeRef>${gatewayId}</flowNodeRef>\n`;
+                if (row.typeBpmn === 'StartEvent') {
+                    flowNodeRefs += `        <flowNodeRef>Start_${row.id}</flowNodeRef>\n`;
+                } else if (row.typeBpmn === 'EndEvent') {
+                    flowNodeRefs += `        <flowNodeRef>End_${row.id}</flowNodeRef>\n`;
+                } else if (row.typeBpmn === 'ExclusiveGateway') {
+                    flowNodeRefs += `        <flowNodeRef>Gateway_${row.id}</flowNodeRef>\n`;
+                } else {
+                    flowNodeRefs += `        <flowNodeRef>Task_${row.id}</flowNodeRef>\n`;
                 }
             });
 
-            // Ajouter End dans la dernière lane
-            if (serviceIndex === services.length - 1) {
-                flowNodeRefs += `        <flowNodeRef>End</flowNodeRef>\n`;
-            }
-
-            lanesXML += `      <lane id="${laneId}" name="${this.escapeXml(service)}">
+            lanesXML += `      <lane id="${laneId}" name="${this.escapeXml(acteur)}">
 ${flowNodeRefs}      </lane>\n`;
         });
 
         return lanesXML;
     }
 
-    /**
-     * Génère les tâches et les flux de séquence
-     */
-    private generateTasks(data: ProcessRow[], services: string[]): { tasksXML: string, sequenceFlowsXML: string } {
-        let tasksXML = `    <startEvent id="Start" name="Début" />\n`;
-        let sequenceFlowsXML = '';
+    private generateTasksAndFlows(data: Table1Row[]): { tasksXML: string, flowsXML: string } {
+        let tasksXML = '';
+        let flowsXML = '';
 
-        // Positionner toutes les tâches
-        data.forEach((row) => {
-            const columnIndex = this.columnPositions.get(row.step) || 0;
-            const laneIndex = services.indexOf(row.service);
+        data.forEach(row => {
+            if (row.typeBpmn === 'StartEvent') {
+                tasksXML += `    <startEvent id="Start_${row.id}" name="${this.escapeXml(row.étape)}" />\n`;
 
-            const taskX = this.config.startX + (columnIndex * this.config.taskSpacing);
-            const taskY = this.config.startY + (laneIndex * this.config.laneHeight) + 60;
+                if (row.outputOui && row.outputOui.trim() !== '') {
+                    const targetId = this.getElementId(row.outputOui);
+                    flowsXML += `    <sequenceFlow id="Flow_${row.id}_yes" sourceRef="Start_${row.id}" targetRef="${targetId}" />\n`;
+                }
+            } else if (row.typeBpmn === 'EndEvent') {
+                tasksXML += `    <endEvent id="End_${row.id}" name="${this.escapeXml(row.étape)}" />\n`;
+            } else if (row.typeBpmn === 'ExclusiveGateway') {
+                tasksXML += `    <exclusiveGateway id="Gateway_${row.id}" name="${this.escapeXml(row.condition)}" />\n`;
 
-            this.taskPositions.set(row.step, { x: taskX, y: taskY, service: row.service, laneIndex });
-        });
-
-        // Générer les tâches XML
-        data.forEach((row) => {
-            const taskId = this.getTaskId(row.step);
-
-            if (row.type === "Conditionnelle") {
-                const gatewayId = this.getGatewayId(row.step);
-
-                tasksXML += `    <userTask id="${taskId}" name="${this.escapeXml(row.task)}" />\n`;
-                tasksXML += `    <exclusiveGateway id="${gatewayId}" name="${this.escapeXml(row.condition)}" />\n`;
-
-                // Flow: tâche -> gateway
-                sequenceFlowsXML += `    <sequenceFlow id="Flow_${taskId}_${gatewayId}" sourceRef="${taskId}" targetRef="${gatewayId}" />\n`;
-
-                // Flows conditionnels - CORRECTION: gérer les cas vides
-                if (row.yes && row.yes.trim()) {
-                    const targetId = this.resolveTargetId(row.yes);
-                    sequenceFlowsXML += `    <sequenceFlow id="Flow_${gatewayId}_yes" name="Oui" sourceRef="${gatewayId}" targetRef="${targetId}" />\n`;
-                } else {
-                    // Si pas de yes, aller vers End
-                    sequenceFlowsXML += `    <sequenceFlow id="Flow_${gatewayId}_yes" name="Oui" sourceRef="${gatewayId}" targetRef="End" />\n`;
+                if (row.outputOui && row.outputOui.trim() !== '') {
+                    const yesTarget = this.getElementId(row.outputOui);
+                    flowsXML += `    <sequenceFlow id="Flow_${row.id}_yes" name="Oui" sourceRef="Gateway_${row.id}" targetRef="${yesTarget}" />\n`;
                 }
 
-                if (row.no && row.no.trim()) {
-                    const targetId = this.resolveTargetId(row.no);
-                    sequenceFlowsXML += `    <sequenceFlow id="Flow_${gatewayId}_no" name="Non" sourceRef="${gatewayId}" targetRef="${targetId}" />\n`;
-                } else {
-                    // Si pas de no, aller vers End
-                    sequenceFlowsXML += `    <sequenceFlow id="Flow_${gatewayId}_no" name="Non" sourceRef="${gatewayId}" targetRef="End" />\n`;
+                if (row.outputNon && row.outputNon.trim() !== '') {
+                    const noTarget = this.getElementId(row.outputNon);
+                    flowsXML += `    <sequenceFlow id="Flow_${row.id}_no" name="Non" sourceRef="Gateway_${row.id}" targetRef="${noTarget}" />\n`;
                 }
             } else {
-                // Tâche séquentielle
-                tasksXML += `    <userTask id="${taskId}" name="${this.escapeXml(row.task)}" />\n`;
+                tasksXML += `    <userTask id="Task_${row.id}" name="${this.escapeXml(row.étape)}" />\n`;
 
-                // Flow vers l'étape suivante - CORRECTION: gérer les cas vides
-                if (row.yes && row.yes.trim()) {
-                    const targetId = this.resolveTargetId(row.yes);
-                    sequenceFlowsXML += `    <sequenceFlow id="Flow_${taskId}_next" sourceRef="${taskId}" targetRef="${targetId}" />\n`;
-                } else {
-                    // Si pas de "yes", connecter à End
-                    sequenceFlowsXML += `    <sequenceFlow id="Flow_${taskId}_end" sourceRef="${taskId}" targetRef="End" />\n`;
+                if (row.outputOui && row.outputOui.trim() !== '' && row.outputNon && row.outputNon.trim() !== '') {
+                    const yesTarget = this.getElementId(row.outputOui);
+                    const noTarget = this.getElementId(row.outputNon);
+                    flowsXML += `    <sequenceFlow id="Flow_${row.id}_yes" name="Confirmer" sourceRef="Task_${row.id}" targetRef="${yesTarget}" />\n`;
+                    flowsXML += `    <sequenceFlow id="Flow_${row.id}_no" name="Annuler" sourceRef="Task_${row.id}" targetRef="${noTarget}" />\n`;
+                } else if (row.outputOui && row.outputOui.trim() !== '') {
+                    const nextTarget = this.getElementId(row.outputOui);
+                    flowsXML += `    <sequenceFlow id="Flow_${row.id}_next" sourceRef="Task_${row.id}" targetRef="${nextTarget}" />\n`;
                 }
             }
         });
 
-        // Ajouter l'événement de fin
-        tasksXML += `    <endEvent id="End" name="Fin" />\n`;
-
-        // Flow de Start vers la première tâche
-        if (data.length > 0) {
-            const firstTaskId = this.getTaskId(data[0].step);
-            sequenceFlowsXML = `    <sequenceFlow id="Flow_start" sourceRef="Start" targetRef="${firstTaskId}" />\n` + sequenceFlowsXML;
-        }
-
-        return { tasksXML, sequenceFlowsXML };
+        return { tasksXML, flowsXML };
     }
 
-    /**
-     * Génère les formes et arêtes du diagramme
-     */
-    private generateDiagram(services: string[], data: ProcessRow[]): { shapesXML: string, edgesXML: string } {
+    private generateDiagram(data: Table1Row[]): { shapesXML: string, edgesXML: string } {
         let shapesXML = '';
         let edgesXML = '';
 
-        // Formes des lanes
-        services.forEach((service, serviceIndex) => {
-            const laneId = this.getLaneId(service);
-            const laneY = this.config.startY + (serviceIndex * this.config.laneHeight);
+        const diagramWidth = this.layoutEngine.getDiagramWidth();
+        const laneHeight = 350;
+
+        this.acteurs.forEach((acteur, index) => {
+            const laneId = this.getLaneId(acteur);
+            const laneY = index * laneHeight;
 
             shapesXML += `      <bpmndi:BPMNShape id="${laneId}_di" bpmnElement="${laneId}" isHorizontal="true">
-        <dc:Bounds x="160" y="${laneY}" width="3000" height="${this.config.laneHeight}" />
+        <dc:Bounds x="80" y="${laneY}" width="${diagramWidth}" height="${laneHeight}" />
+        <bpmndi:BPMNLabel />
       </bpmndi:BPMNShape>\n`;
         });
 
-        // Event de début (dans la première lane)
-        const startX = 200;
-        const startY = this.config.startY + 60;
-        shapesXML += `      <bpmndi:BPMNShape id="Start_di" bpmnElement="Start">
-        <dc:Bounds x="${startX}" y="${startY}" width="36" height="36" />
+        data.forEach(row => {
+            const pos = this.positions.get(row.id);
+            if (!pos) return;
+
+            if (row.typeBpmn === 'StartEvent') {
+                const eventSize = 42;
+                const x = pos.x - eventSize / 2;
+                const y = pos.y + (this.nodeHeight - eventSize) / 2;
+
+                shapesXML += `      <bpmndi:BPMNShape id="Start_${row.id}_di" bpmnElement="Start_${row.id}">
+        <dc:Bounds x="${x}" y="${y}" width="${eventSize}" height="${eventSize}" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="${startX + 3}" y="${startY + 40}" width="30" height="14" />
+          <dc:Bounds x="${x - 30}" y="${y + eventSize + 5}" width="${eventSize + 60}" height="40" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>\n`;
 
-        // Edge: Start -> première tâche
-        if (data.length > 0) {
-            const firstPos = this.taskPositions.get(data[0].step)!;
-            edgesXML += `      <bpmndi:BPMNEdge id="Flow_start_di" bpmnElement="Flow_start">
-        <di:waypoint x="${startX + 36}" y="${startY + 18}" />
-        <di:waypoint x="${firstPos.x}" y="${firstPos.y + this.config.taskHeight / 2}" />
-      </bpmndi:BPMNEdge>\n`;
-        }
+                if (row.outputOui && row.outputOui.trim() !== '') {
+                    edgesXML += this.generateEdge(row, `Start_${row.id}`, row.outputOui, 'yes', pos);
+                }
+            } else if (row.typeBpmn === 'EndEvent') {
+                const eventSize = 42;
+                const x = pos.x - eventSize / 2;
+                const y = pos.y + (this.nodeHeight - eventSize) / 2;
 
-        // Formes des tâches et gateways
-        data.forEach((row) => {
-            const taskId = this.getTaskId(row.step);
-            const pos = this.taskPositions.get(row.step)!;
-
-            shapesXML += `      <bpmndi:BPMNShape id="${taskId}_di" bpmnElement="${taskId}">
-        <dc:Bounds x="${pos.x}" y="${pos.y}" width="${this.config.taskWidth}" height="${this.config.taskHeight}" />
-      </bpmndi:BPMNShape>\n`;
-
-            if (row.type === "Conditionnelle") {
-                const gatewayId = this.getGatewayId(row.step);
-                const gatewayX = pos.x + this.config.taskWidth + 40;
-                const gatewayY = pos.y + (this.config.taskHeight / 2) - 25;
-
-                shapesXML += `      <bpmndi:BPMNShape id="${gatewayId}_di" bpmnElement="${gatewayId}" isMarkerVisible="true">
-        <dc:Bounds x="${gatewayX}" y="${gatewayY}" width="50" height="50" />
+                shapesXML += `      <bpmndi:BPMNShape id="End_${row.id}_di" bpmnElement="End_${row.id}">
+        <dc:Bounds x="${x}" y="${y}" width="${eventSize}" height="${eventSize}" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="${gatewayX - 15}" y="${gatewayY + 55}" width="80" height="27" />
+          <dc:Bounds x="${x - 30}" y="${y + eventSize + 5}" width="${eventSize + 60}" height="40" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>\n`;
+            } else if (row.typeBpmn === 'ExclusiveGateway') {
+                const gwX = pos.x;
+                const gwY = pos.y + (this.nodeHeight - this.gatewaySize) / 2;
+
+                shapesXML += `      <bpmndi:BPMNShape id="Gateway_${row.id}_di" bpmnElement="Gateway_${row.id}" isMarkerVisible="true">
+        <dc:Bounds x="${gwX}" y="${gwY}" width="${this.gatewaySize}" height="${this.gatewaySize}" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="${gwX - 50}" y="${gwY + this.gatewaySize + 5}" width="160" height="40" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>\n`;
 
-                // Edge: tâche -> gateway
-                edgesXML += `      <bpmndi:BPMNEdge id="Flow_${taskId}_${gatewayId}_di" bpmnElement="Flow_${taskId}_${gatewayId}">
-        <di:waypoint x="${pos.x + this.config.taskWidth}" y="${pos.y + this.config.taskHeight / 2}" />
-        <di:waypoint x="${gatewayX}" y="${gatewayY + 25}" />
-      </bpmndi:BPMNEdge>\n`;
-
-                const endPos = this.getEndPosition(services);
-
-                // Edges conditionnels - CORRECTION: gérer les connexions vers End
-                if (row.yes && row.yes.trim()) {
-                    const targetPos = this.getTargetPosition(row.yes);
-                    if (targetPos) {
-                        edgesXML += this.generateConditionalEdge(gatewayId, 'yes', gatewayX, gatewayY, targetPos, true);
-                    } else {
-                        // Connecter à End
-                        edgesXML += this.generateEdgeToEnd(gatewayId, 'yes', gatewayX, gatewayY, endPos, true);
-                    }
-                } else {
-                    // Pas de yes, connecter à End
-                    edgesXML += this.generateEdgeToEnd(gatewayId, 'yes', gatewayX, gatewayY, endPos, true);
+                if (row.outputOui && row.outputOui.trim() !== '') {
+                    edgesXML += this.generateEdge(row, `Gateway_${row.id}`, row.outputOui, 'yes', pos);
                 }
 
-                if (row.no && row.no.trim()) {
-                    const targetPos = this.getTargetPosition(row.no);
-                    if (targetPos) {
-                        edgesXML += this.generateConditionalEdge(gatewayId, 'no', gatewayX, gatewayY, targetPos, false);
-                    } else {
-                        // Connecter à End
-                        edgesXML += this.generateEdgeToEnd(gatewayId, 'no', gatewayX, gatewayY, endPos, false);
-                    }
-                } else {
-                    // Pas de no, connecter à End
-                    edgesXML += this.generateEdgeToEnd(gatewayId, 'no', gatewayX, gatewayY, endPos, false);
+                if (row.outputNon && row.outputNon.trim() !== '') {
+                    edgesXML += this.generateEdge(row, `Gateway_${row.id}`, row.outputNon, 'no', pos);
                 }
             } else {
-                // Edge séquentiel - CORRECTION: gérer les connexions vers End
-                if (row.yes && row.yes.trim()) {
-                    const targetPos = this.getTargetPosition(row.yes);
-                    if (targetPos) {
-                        edgesXML += this.generateSequentialEdge(taskId, pos, targetPos);
-                    } else {
-                        // Connecter à End
-                        const endPos = this.getEndPosition(services);
-                        edgesXML += `      <bpmndi:BPMNEdge id="Flow_${taskId}_end_di" bpmnElement="Flow_${taskId}_end">
-        <di:waypoint x="${pos.x + this.config.taskWidth}" y="${pos.y + this.config.taskHeight / 2}" />
-        <di:waypoint x="${endPos.x}" y="${endPos.y + 18}" />
-      </bpmndi:BPMNEdge>\n`;
-                    }
-                } else {
-                    // Pas de yes, connecter à End
-                    const endPos = this.getEndPosition(services);
-                    edgesXML += `      <bpmndi:BPMNEdge id="Flow_${taskId}_end_di" bpmnElement="Flow_${taskId}_end">
-        <di:waypoint x="${pos.x + this.config.taskWidth}" y="${pos.y + this.config.taskHeight / 2}" />
-        <di:waypoint x="${endPos.x}" y="${endPos.y + 18}" />
-      </bpmndi:BPMNEdge>\n`;
+                shapesXML += `      <bpmndi:BPMNShape id="Task_${row.id}_di" bpmnElement="Task_${row.id}">
+        <dc:Bounds x="${pos.x}" y="${pos.y}" width="${this.nodeWidth}" height="${this.nodeHeight}" />
+      </bpmndi:BPMNShape>\n`;
+
+                if (row.outputOui && row.outputOui.trim() !== '' && row.outputNon && row.outputNon.trim() !== '') {
+                    edgesXML += this.generateEdge(row, `Task_${row.id}`, row.outputOui, 'yes', pos);
+                    edgesXML += this.generateEdge(row, `Task_${row.id}`, row.outputNon, 'no', pos);
+                } else if (row.outputOui && row.outputOui.trim() !== '') {
+                    edgesXML += this.generateEdge(row, `Task_${row.id}`, row.outputOui, 'next', pos);
                 }
             }
         });
-
-        // Event de fin
-        const endPos = this.getEndPosition(services);
-        shapesXML += `      <bpmndi:BPMNShape id="End_di" bpmnElement="End">
-        <dc:Bounds x="${endPos.x}" y="${endPos.y}" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="${endPos.x + 8}" y="${endPos.y + 40}" width="20" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>\n`;
 
         return { shapesXML, edgesXML };
     }
 
-    /**
-     * Génère un edge conditionnel avec waypoints appropriés
-     */
-    private generateConditionalEdge(
-        gatewayId: string,
-        type: 'yes' | 'no',
-        gatewayX: number,
-        gatewayY: number,
-        targetPos: TaskPosition,
-        isYes: boolean
-    ): string {
-        const gatewayCenterX = gatewayX + 25;
-        const gatewayCenterY = gatewayY + 25;
-        const targetCenterX = targetPos.x + this.config.taskWidth / 2;
-        const targetCenterY = targetPos.y + this.config.taskHeight / 2;
+    private generateEdge(row: Table1Row, sourceRef: string, targetId: string, type: 'yes' | 'no' | 'next', sourcePos: NodePosition): string {
+        const targetRow = this.idMap.get(targetId);
+        const targetPos = this.positions.get(targetId);
 
-        let waypoints = '';
+        if (!targetRow || !targetPos) return '';
 
-        // Si le target est dans une lane différente, créer des waypoints
-        if (Math.abs(targetCenterY - gatewayCenterY) > 20) {
-            waypoints = `        <di:waypoint x="${gatewayCenterX}" y="${gatewayCenterY}" />
-        <di:waypoint x="${gatewayCenterX + (isYes ? 50 : -50)}" y="${gatewayCenterY}" />
-        <di:waypoint x="${gatewayCenterX + (isYes ? 50 : -50)}" y="${targetCenterY}" />
-        <di:waypoint x="${targetPos.x}" y="${targetCenterY}" />`;
+        const targetElementId = this.getElementId(targetId);
+        const flowId = `Flow_${row.id}_${type}`;
+
+        let sourceX: number, sourceY: number, targetX: number, targetY: number;
+
+        // Calcul des points de connexion SOURCE
+        if (row.typeBpmn === 'StartEvent') {
+            sourceX = sourcePos.x + 21;
+            sourceY = sourcePos.y + this.nodeHeight / 2;
+        } else if (row.typeBpmn === 'ExclusiveGateway') {
+            const gwX = sourcePos.x;
+            const gwY = sourcePos.y + (this.nodeHeight - this.gatewaySize) / 2;
+
+            if (type === 'yes') {
+                sourceX = gwX + this.gatewaySize;
+                sourceY = gwY + this.gatewaySize / 2;
+            } else {
+                sourceX = gwX + this.gatewaySize / 2;
+                sourceY = gwY + this.gatewaySize;
+            }
         } else {
-            waypoints = `        <di:waypoint x="${gatewayCenterX}" y="${gatewayCenterY}" />
-        <di:waypoint x="${targetPos.x}" y="${targetCenterY}" />`;
+            sourceX = sourcePos.x + this.nodeWidth;
+            sourceY = sourcePos.y + this.nodeHeight / 2;
         }
 
-        const label = type === 'yes' ? 'Oui' : 'Non';
+        // Calcul des points de connexion TARGET
+        if (targetRow.typeBpmn === 'EndEvent' || targetRow.typeBpmn === 'StartEvent') {
+            targetX = targetPos.x + 21;
+            targetY = targetPos.y + this.nodeHeight / 2;
+        } else if (targetRow.typeBpmn === 'ExclusiveGateway') {
+            const gwX = targetPos.x;
+            const gwY = targetPos.y + (this.nodeHeight - this.gatewaySize) / 2;
+            targetX = gwX;
+            targetY = gwY + this.gatewaySize / 2;
+        } else {
+            targetX = targetPos.x;
+            targetY = targetPos.y + this.nodeHeight / 2;
+        }
 
-        return `      <bpmndi:BPMNEdge id="Flow_${gatewayId}_${type}_di" bpmnElement="Flow_${gatewayId}_${type}">
-${waypoints}
+        const isChangingLane = Math.abs(targetY - sourceY) > 60;
+        const isBackward = targetX < sourceX;
+
+        let edgeXML = `      <bpmndi:BPMNEdge id="${flowId}_di" bpmnElement="${flowId}">\n`;
+
+        if (isBackward && type === 'no') {
+            // Retour en arrière avec arc au-dessus
+            const topY = sourcePos.y - 80;
+            const leftX = targetX - 80;
+
+            edgeXML += `        <di:waypoint x="${sourceX}" y="${sourceY}" />
+        <di:waypoint x="${sourceX}" y="${topY}" />
+        <di:waypoint x="${leftX}" y="${topY}" />
+        <di:waypoint x="${leftX}" y="${targetY}" />
+        <di:waypoint x="${targetX}" y="${targetY}" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="${gatewayCenterX + 10}" y="${gatewayCenterY - 10}" width="24" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNEdge>\n`;
-    }
+          <dc:Bounds x="${sourceX - 30}" y="${topY - 20}" width="36" height="18" />
+        </bpmndi:BPMNLabel>\n`;
+        } else if (isChangingLane) {
+            // Changement de lane
+            const midX = sourceX + 50;
+            edgeXML += `        <di:waypoint x="${sourceX}" y="${sourceY}" />
+        <di:waypoint x="${midX}" y="${sourceY}" />
+        <di:waypoint x="${midX}" y="${targetY}" />
+        <di:waypoint x="${targetX}" y="${targetY}" />\n`;
 
-    /**
-     * NOUVELLE MÉTHODE: Génère un edge vers End depuis un gateway
-     */
-    private generateEdgeToEnd(
-        gatewayId: string,
-        type: 'yes' | 'no',
-        gatewayX: number,
-        gatewayY: number,
-        endPos: { x: number, y: number },
-        isYes: boolean
-    ): string {
-        const gatewayCenterX = gatewayX + 25;
-        const gatewayCenterY = gatewayY + 25;
-        const endCenterY = endPos.y + 18;
-
-        let waypoints = '';
-
-        // Créer des waypoints pour aller vers End
-        if (Math.abs(endCenterY - gatewayCenterY) > 20) {
-            waypoints = `        <di:waypoint x="${gatewayCenterX}" y="${gatewayCenterY}" />
-        <di:waypoint x="${gatewayCenterX + (isYes ? 50 : -50)}" y="${gatewayCenterY}" />
-        <di:waypoint x="${gatewayCenterX + (isYes ? 50 : -50)}" y="${endCenterY}" />
-        <di:waypoint x="${endPos.x}" y="${endCenterY}" />`;
+            if (type === 'yes' || type === 'no') {
+                edgeXML += `        <bpmndi:BPMNLabel>
+          <dc:Bounds x="${midX + 10}" y="${Math.min(sourceY, targetY) + 30}" width="32" height="18" />
+        </bpmndi:BPMNLabel>\n`;
+            }
         } else {
-            waypoints = `        <di:waypoint x="${gatewayCenterX}" y="${gatewayCenterY}" />
-        <di:waypoint x="${endPos.x}" y="${endCenterY}" />`;
+            // Connexion directe
+            edgeXML += `        <di:waypoint x="${sourceX}" y="${sourceY}" />
+        <di:waypoint x="${targetX}" y="${targetY}" />\n`;
+
+            if (type === 'yes' || type === 'no') {
+                edgeXML += `        <bpmndi:BPMNLabel>
+          <dc:Bounds x="${(sourceX + targetX) / 2 - 16}" y="${sourceY - 22}" width="32" height="18" />
+        </bpmndi:BPMNLabel>\n`;
+            }
         }
 
-        const label = type === 'yes' ? 'Oui' : 'Non';
+        edgeXML += `      </bpmndi:BPMNEdge>\n`;
 
-        return `      <bpmndi:BPMNEdge id="Flow_${gatewayId}_${type}_di" bpmnElement="Flow_${gatewayId}_${type}">
-${waypoints}
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="${gatewayCenterX + 10}" y="${gatewayCenterY - 10}" width="24" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNEdge>\n`;
+        return edgeXML;
     }
 
-    /**
-     * Génère un edge séquentiel
-     */
-    private generateSequentialEdge(taskId: string, sourcePos: TaskPosition, targetPos: TaskPosition): string {
-        const sourceCenterY = sourcePos.y + this.config.taskHeight / 2;
-        const targetCenterY = targetPos.y + this.config.taskHeight / 2;
+    private getElementId(id: string): string {
+        const row = this.idMap.get(id);
+        if (!row) return `Task_${id}`;
 
-        let waypoints = '';
-
-        if (Math.abs(targetCenterY - sourceCenterY) > 20) {
-            // Si changement de lane, ajouter des waypoints intermédiaires
-            const midX = sourcePos.x + this.config.taskWidth + 50;
-            waypoints = `        <di:waypoint x="${sourcePos.x + this.config.taskWidth}" y="${sourceCenterY}" />
-        <di:waypoint x="${midX}" y="${sourceCenterY}" />
-        <di:waypoint x="${midX}" y="${targetCenterY}" />
-        <di:waypoint x="${targetPos.x}" y="${targetCenterY}" />`;
-        } else {
-            waypoints = `        <di:waypoint x="${sourcePos.x + this.config.taskWidth}" y="${sourceCenterY}" />
-        <di:waypoint x="${targetPos.x}" y="${targetCenterY}" />`;
-        }
-
-        return `      <bpmndi:BPMNEdge id="Flow_${taskId}_next_di" bpmnElement="Flow_${taskId}_next">
-${waypoints}
-      </bpmndi:BPMNEdge>\n`;
+        if (row.typeBpmn === 'StartEvent') return `Start_${id}`;
+        if (row.typeBpmn === 'EndEvent') return `End_${id}`;
+        if (row.typeBpmn === 'ExclusiveGateway') return `Gateway_${id}`;
+        return `Task_${id}`;
     }
 
-    /**
-     * Récupère la position d'une cible (étape ou service)
-     */
-    private getTargetPosition(target: string): TaskPosition | null {
-        if (!target || !target.trim()) return null;
-
-        // Vérifier si c'est "End" ou "Fin"
-        if (target.toLowerCase() === 'end' || target.toLowerCase() === 'fin') {
-            return null;
-        }
-
-        if (target.includes('.')) {
-            // C'est une étape
-            return this.taskPositions.get(target) || null;
-        }
-
-        // C'est un service - trouver la première tâche de ce service
-        const rows = this.serviceMap.get(target);
-        if (rows && rows.length > 0) {
-            return this.taskPositions.get(rows[0].step) || null;
-        }
-
-        return null;
-    }
-
-    /**
-     * Calcule la position de l'événement de fin
-     */
-    private getEndPosition(services: string[]): { x: number, y: number } {
-        const maxColumn = Math.max(...Array.from(this.columnPositions.values()));
-        const endX = this.config.startX + ((maxColumn + 1) * this.config.taskSpacing) + 100;
-        const endY = this.config.startY + ((services.length - 1) * this.config.laneHeight) + 60;
-        return { x: endX, y: endY };
-    }
-
-    /**
-     * Construit le XML BPMN complet
-     */
-    private buildXML(
-        lanesXML: string,
-        tasksXML: string,
-        sequenceFlowsXML: string,
-        shapesXML: string,
-        edgesXML: string
-    ): string {
+    private buildXML(lanes: string, tasks: string, flows: string, shapes: string, edges: string): string {
         return `<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" 
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" 
              xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" 
              xmlns:di="http://www.omg.org/spec/DD/20100524/DI" 
              id="Definitions_1" 
-             targetNamespace="http://example.com"
-             exporter="BPMN Voice Generator"
-             exporterVersion="1.0.0">
+             targetNamespace="http://example.com">
   <process id="Process_1" isExecutable="false">
     <laneSet id="LaneSet_1">
-${lanesXML}    </laneSet>
-${tasksXML}
-${sequenceFlowsXML}
-  </process>
+${lanes}    </laneSet>
+${tasks}${flows}  </process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_1">
     <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_1">
-${shapesXML}
-${edgesXML}
-    </bpmndi:BPMNPlane>
+${shapes}${edges}    </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
 </definitions>`;
     }
 
-    // === Méthodes utilitaires ===
-
-    private getLaneId(service: string): string {
-        return `Lane_${service.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
-    }
-
-    private getTaskId(step: string): string {
-        return `Task_${step.replace(/\./g, '_')}`;
-    }
-
-    private getGatewayId(step: string): string {
-        return `Gateway_${step.replace(/\./g, '_')}`;
-    }
-
-    private resolveTargetId(target: string): string {
-        if (!target || !target.trim()) return 'End';
-
-        // Si c'est un numéro d'étape (ex: "1.3")
-        if (target.includes('.')) {
-            return this.getTaskId(target);
-        }
-
-        // Si c'est "End" ou "Fin"
-        if (target.toLowerCase() === 'end' || target.toLowerCase() === 'fin') {
-            return 'End';
-        }
-
-        // Sinon c'est un nom de service - trouver la première tâche
-        const rows = this.serviceMap.get(target);
-        if (rows && rows.length > 0) {
-            return this.getTaskId(rows[0].step);
-        }
-
-        return 'End';
+    private getLaneId(acteur: string): string {
+        return `Lane_${acteur.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
     }
 
     private escapeXml(text: string): string {
@@ -572,8 +364,7 @@ ${edgesXML}
     }
 }
 
-// Fonction helper pour usage simple
-export function generateBPMN(data: ProcessRow[], config?: BPMNGeneratorConfig): string {
+export function generateBPMN(data: Table1Row[], config?: BPMNGeneratorConfig): string {
     const generator = new BPMNGenerator(config);
     return generator.generate(data);
 }
