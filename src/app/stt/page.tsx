@@ -1,12 +1,27 @@
 'use client';
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { generateBPMN, Table1Row } from "@/logic/bpmnGenerator";
-import BPMNViewer from "@/components/BPMNViewer";
-import ImageUploadSection from "@/components/ImgUpload";
-import { FileText, Mic, Square, Sparkles, FileDown, RotateCcw, Trash2, Plus, ChevronDown, ChevronUp, AlertCircle, CheckCircle, Info } from "lucide-react";
+import {
+    ProcessMetadata,
+    TaskEnrichment,
+    DEFAULT_PROCESS_METADATA,
+    DEFAULT_ENRICHMENTS
+} from "@/logic/bpmnTypes";
+import BPMNViewer, { BPMNViewerHandle } from "@/components/BPMNViewer";
+import Table from "@/components/ProcessTable";
+import ImageUploadSection from "@/components/clinic/ImgUpload";
+import CameraScanSection from "@/components/clinic/CameraScan";
+import ExtractionErrorsBox from "@/components/clinic/ExtractionErrorsBox";
+import DocumentExportPanel from "@/components/DocumentExportPanel"; // 🆕 AJOUTÉ
+import {
+    FileText, Mic, Square, FileDown, RotateCcw, Trash2,
+    ChevronDown, ChevronUp, AlertCircle, CheckCircle, Info, Camera,
+    ImageIcon, RefreshCw
+} from "lucide-react";
+import { API_CONFIG } from "@/lib/api-config";
 
-// ===== DONNÉES PAR DÉFAUT (Processus création compte bancaire) =====
+// ===== DONNÉES PAR DÉFAUT =====
 const defaultData: Table1Row[] = [
     { id: '1', étape: 'Début du processus', typeBpmn: 'StartEvent', département: 'Front Office', acteur: 'Client', condition: '', outputOui: '2', outputNon: '', outil: 'Portail web' },
     { id: '2', étape: 'Prendre rendez-vous en ligne', typeBpmn: 'Task', département: 'Front Office', acteur: 'Client', condition: '', outputOui: '3', outputNon: '', outil: 'Application mobile / Site' },
@@ -49,7 +64,9 @@ const defaultData: Table1Row[] = [
 ];
 
 export default function VoiceProcessPage() {
+    // ===== STATES EXISTANTS =====
     const [data, setData] = useState<Table1Row[]>(defaultData);
+    const [processTitle, setProcessTitle] = useState("Processus d'ouverture de compte bancaire");
     const [recording, setRecording] = useState(false);
     const [processing, setProcessing] = useState(false);
     const [improving, setImproving] = useState(false);
@@ -59,7 +76,18 @@ export default function VoiceProcessPage() {
     const [showDiagram, setShowDiagram] = useState(false);
     const [bpmnXml, setBpmnXml] = useState<string>("");
     const [guideOpen, setGuideOpen] = useState(false);
-    const [mounted, setMounted] = useState(false);
+    const [activeUploadTab, setActiveUploadTab] = useState<'upload' | 'camera'>('upload');
+    const [isEditingBpmn, setIsEditingBpmn] = useState(false);
+
+    // ===== NOUVEAUX STATES POUR ENRICHISSEMENTS =====
+    const [processMetadata, setProcessMetadata] = useState<ProcessMetadata>(DEFAULT_PROCESS_METADATA);
+    const [enrichments, setEnrichments] = useState<Map<string, TaskEnrichment>>(DEFAULT_ENRICHMENTS);
+
+    // ===== NOUVEAU STATE POUR VÉRIFICATION =====
+    const [verificationResult, setVerificationResult] = useState<any>(null);
+
+    // 🆕 REF POUR BPMN VIEWER
+    const bpmnViewerRef = useRef<BPMNViewerHandle>(null);
 
     const showError = (message: string) => {
         setError(message);
@@ -71,14 +99,46 @@ export default function VoiceProcessPage() {
         setTimeout(() => setSuccess(null), 4000);
     };
 
-    // ===== GESTION IMAGE =====
-    const handleImageWorkflowExtracted = (workflow: Table1Row[]) => {
+    const handleImageWorkflowExtracted = (
+        workflow: Table1Row[],
+        title?: string,
+        enrichments?: Map<string, TaskEnrichment>
+    ) => {
         setData(workflow);
+        if (title) {
+            setProcessTitle(title);
+        }
         setShowDiagram(false);
         setBpmnXml("");
+        setVerificationResult(null);
+
+        if (enrichments && enrichments.size > 0) {
+            setEnrichments(enrichments);
+        } else {
+            const newEnrichments = new Map<string, TaskEnrichment>();
+            workflow.forEach(row => {
+                newEnrichments.set(row.id, {
+                    id_tache: row.id,
+                    descriptif: '',
+                    duree_estimee: '',
+                    frequence: '',
+                    kpi: ''
+                });
+            });
+            setEnrichments(newEnrichments);
+        }
     };
 
-    // ===== AMÉLIORATION IA =====
+    const handleVerificationComplete = (result: any) => {
+        setVerificationResult(result);
+    };
+
+    const handleBpmnUpdate = (updatedXml: string) => {
+        setBpmnXml(updatedXml);
+        setIsEditingBpmn(true);
+        showSuccess("Diagramme BPMN mis à jour avec succès !");
+    };
+
     const handleImproveWorkflow = async () => {
         if (data.length === 0) {
             showError("Le tableau est vide, rien à améliorer");
@@ -88,7 +148,9 @@ export default function VoiceProcessPage() {
         setImproving(true);
 
         try {
-            const response = await fetch("http://localhost:8002/api/img-to-bpmn/improve", {
+            const url = API_CONFIG.getFullUrl(API_CONFIG.endpoints.imgToBpmnImprove);
+
+            const response = await fetch(url, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
@@ -106,7 +168,6 @@ export default function VoiceProcessPage() {
             setShowDiagram(false);
             setBpmnXml("");
 
-            // Affichage des améliorations
             const improvements = result.metadata?.improvements;
             if (improvements) {
                 const msg = `Workflow amélioré ! ${improvements.steps_reformulated || 0} étape(s) reformulée(s), ${improvements.actors_clarified || 0} acteur(s) clarifié(s), ${improvements.tools_identified || 0} outil(s) identifié(s)`;
@@ -122,7 +183,6 @@ export default function VoiceProcessPage() {
         }
     };
 
-    // ===== GESTION VOCAL =====
     const toggleRecording = async () => {
         if (!recording) {
             try {
@@ -139,7 +199,9 @@ export default function VoiceProcessPage() {
                     formData.append("file", blob, "audio.webm");
 
                     try {
-                        const res = await fetch("http://localhost:8002/api/transcribe", {
+                        const url = API_CONFIG.getFullUrl(API_CONFIG.endpoints.transcribe);
+
+                        const res = await fetch(url, {
                             method: "POST",
                             body: formData
                         });
@@ -167,6 +229,19 @@ export default function VoiceProcessPage() {
 
                             if (newRows.length > 0) {
                                 setData((prev) => [...prev, ...newRows]);
+
+                                const newEnrichments = new Map(enrichments);
+                                newRows.forEach(row => {
+                                    newEnrichments.set(row.id, {
+                                        id_tache: row.id,
+                                        descriptif: '',
+                                        duree_estimee: '',
+                                        frequence: '',
+                                        kpi: ''
+                                    });
+                                });
+                                setEnrichments(newEnrichments);
+
                                 showSuccess(`${newRows.length} ligne(s) ajoutée(s)`);
                             } else {
                                 showError("Aucune ligne valide extraite");
@@ -192,12 +267,12 @@ export default function VoiceProcessPage() {
         }
     };
 
-    // ===== GESTION BPMN =====
     const handleGenerateBPMN = () => {
         try {
-            const xml = generateBPMN(data);
+            const xml = generateBPMN(data, enrichments, processMetadata);
             setBpmnXml(xml);
             setShowDiagram(true);
+            setIsEditingBpmn(false);
             showSuccess("Diagramme BPMN généré avec succès !");
         } catch (err: any) {
             showError(err.message || "Erreur lors de la génération du BPMN");
@@ -223,8 +298,13 @@ export default function VoiceProcessPage() {
     const resetToDefault = () => {
         if (confirm("Réinitialiser au processus par défaut ? Toutes les modifications seront perdues.")) {
             setData(defaultData);
+            setProcessTitle("Processus d'ouverture de compte bancaire");
+            setProcessMetadata(DEFAULT_PROCESS_METADATA);
+            setEnrichments(DEFAULT_ENRICHMENTS);
             setShowDiagram(false);
             setBpmnXml("");
+            setIsEditingBpmn(false);
+            setVerificationResult(null);
             showSuccess("Tableau réinitialisé au processus par défaut");
         }
     };
@@ -232,44 +312,14 @@ export default function VoiceProcessPage() {
     const clearTable = () => {
         if (confirm("Vider complètement le tableau ?")) {
             setData([]);
+            setProcessTitle("Nouveau processus");
+            setEnrichments(new Map());
             setShowDiagram(false);
             setBpmnXml("");
+            setIsEditingBpmn(false);
+            setVerificationResult(null);
             showSuccess("Tableau vidé");
         }
-    };
-
-    // ===== GESTION TABLEAU =====
-    const handleChange = (index: number, field: keyof Table1Row, value: string) => {
-        const updated = [...data];
-        if (field === "typeBpmn") {
-            updated[index][field] = value as Table1Row["typeBpmn"];
-            if (value !== "ExclusiveGateway") {
-                updated[index].condition = "";
-                updated[index].outputNon = "";
-            }
-        } else {
-            updated[index][field] = value as any;
-        }
-        setData(updated);
-    };
-
-    const handleAddRow = () => {
-        const newRow: Table1Row = {
-            id: crypto.randomUUID(),
-            étape: "",
-            typeBpmn: "Task",
-            département: "",
-            acteur: "",
-            condition: "",
-            outputOui: "",
-            outputNon: "",
-            outil: "",
-        };
-        setData([...data, newRow]);
-    };
-
-    const handleDeleteRow = (index: number) => {
-        setData(data.filter((_, i) => i !== index));
     };
 
     return (
@@ -280,7 +330,12 @@ export default function VoiceProcessPage() {
                 puis générez votre diagramme BPMN
             </p>
 
-            {/* NOTIFICATIONS */}
+            {API_CONFIG.isDevelopment() && (
+                <div className="mb-4 p-3 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded">
+                    <strong>Mode développement :</strong> API → {API_CONFIG.baseUrl}
+                </div>
+            )}
+
             {error && (
                 <div className="mb-4 p-4 bg-red-100 border-l-4 border-red-500 text-red-700 rounded flex items-start gap-3">
                     <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
@@ -297,14 +352,106 @@ export default function VoiceProcessPage() {
                 </div>
             )}
 
-            {/* SECTION IMAGE UPLOAD */}
-            <ImageUploadSection
-                onWorkflowExtracted={handleImageWorkflowExtracted}
-                onError={showError}
-                onSuccess={showSuccess}
-            />
+            {/* TABLE 0 - MÉTADONNÉES DU PROCESSUS */}
+            <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg shadow-lg overflow-hidden border border-blue-200">
+                <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2">
+                        <Info className="w-5 h-5" />
+                        Informations du processus
+                    </h2>
+                </div>
+                <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">
+                            Nom du processus
+                        </label>
+                        <input
+                            type="text"
+                            value={processMetadata.nom}
+                            onChange={(e) => setProcessMetadata({ ...processMetadata, nom: e.target.value })}
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">
+                            Version
+                        </label>
+                        <input
+                            type="text"
+                            value={processMetadata.version}
+                            onChange={(e) => setProcessMetadata({ ...processMetadata, version: e.target.value })}
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">
+                            Propriétaire
+                        </label>
+                        <input
+                            type="text"
+                            value={processMetadata.proprietaire}
+                            onChange={(e) => setProcessMetadata({ ...processMetadata, proprietaire: e.target.value })}
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                    </div>
+                </div>
+            </div>
 
-            {/* GUIDE BPMN RÉTRACTABLE */}
+            {/* SECTION UPLOAD/SCAN */}
+            <div className="mb-6">
+                <div className="flex border-b border-gray-200 mb-4">
+                    <button
+                        onClick={() => setActiveUploadTab('upload')}
+                        className={`flex items-center gap-2 px-4 py-2 font-medium transition-colors ${activeUploadTab === 'upload'
+                            ? 'text-blue-600 border-b-2 border-blue-600'
+                            : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <ImageIcon className="w-4 h-4" />
+                        Upload d'image
+                    </button>
+                    <button
+                        onClick={() => setActiveUploadTab('camera')}
+                        className={`flex items-center gap-2 px-4 py-2 font-medium transition-colors ${activeUploadTab === 'camera'
+                            ? 'text-blue-600 border-b-2 border-blue-600'
+                            : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                    >
+                        <Camera className="w-4 h-4" />
+                        Scanner avec caméra
+                    </button>
+                </div>
+
+                {activeUploadTab === 'upload' ? (
+                    <ImageUploadSection
+                        onWorkflowExtracted={handleImageWorkflowExtracted}
+                        onError={showError}
+                        onSuccess={showSuccess}
+                        currentWorkflow={data}
+                        onVerificationComplete={handleVerificationComplete}
+                    />
+                ) : (
+                    <CameraScanSection
+                        onWorkflowExtracted={handleImageWorkflowExtracted}
+                        onError={showError}
+                        onSuccess={showSuccess}
+                    />
+                )}
+            </div>
+
+            {/* AFFICHAGE DES ERREURS D'EXTRACTION */}
+            {verificationResult && (
+                <div className="mb-6">
+                    <ExtractionErrorsBox
+                        errors={verificationResult.errors || []}
+                        totalExtracted={verificationResult.total_extracted || 0}
+                        totalExpected={verificationResult.total_expected || 0}
+                        accuracy={verificationResult.accuracy || 0}
+                    />
+                </div>
+            )}
+
+            {/* GUIDE */}
             <div className="mb-6 bg-blue-50 border-l-4 border-blue-500 rounded overflow-hidden">
                 <button
                     onClick={() => setGuideOpen(!guideOpen)}
@@ -329,7 +476,7 @@ export default function VoiceProcessPage() {
                             <li><strong>ExclusiveGateway</strong> : Point de décision (remplir la condition)</li>
                             <li><strong>Si Oui/Si Non</strong> : Utilisez les IDs d'étapes pour connecter les étapes</li>
                             <li><strong>Acteur</strong> : Définit les swimlanes (Client, Vente, KYC, etc.)</li>
-                            <li><strong>Améliorer avec IA</strong> : Gemini reformule et optimise votre processus</li>
+                            <li><strong>📝 Détails</strong> : Cliquez pour enrichir une tâche (descriptif, durée, fréquence, KPI)</li>
                         </ul>
                     </div>
                 )}
@@ -363,25 +510,28 @@ export default function VoiceProcessPage() {
                 </button>
 
                 <button
-                    onClick={handleImproveWorkflow}
-                    disabled={data.length === 0 || improving}
-                    className={`px-6 py-3 rounded-lg font-semibold transition-all flex items-center gap-2 ${improving
-                        ? "bg-yellow-400 text-gray-800 cursor-wait animate-pulse"
-                        : "bg-gradient-to-r from-yellow-500 to-orange-500 text-white hover:from-yellow-600 hover:to-orange-600"
-                        } disabled:bg-gray-400 disabled:cursor-not-allowed`}
-                >
-                    <Sparkles className="w-4 h-4" />
-                    {improving ? "Amélioration en cours..." : "Améliorer avec IA"}
-                </button>
-
-                <button
                     onClick={handleGenerateBPMN}
                     disabled={data.length === 0}
                     className="px-6 py-3 rounded-lg bg-purple-600 text-white font-semibold hover:bg-purple-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all flex items-center gap-2"
                 >
                     <FileText className="w-4 h-4" />
-                    Générer le BPMN
+                    {isEditingBpmn ? "Régénérer BPMN" : "Générer le BPMN"}
                 </button>
+
+                {showDiagram && bpmnXml && isEditingBpmn && (
+                    <button
+                        onClick={() => {
+                            if (confirm("⚠️ Régénérer le diagramme depuis le tableau ?\n\nToutes les modifications visuelles du diagramme seront perdues.")) {
+                                handleGenerateBPMN();
+                            }
+                        }}
+                        className="px-6 py-3 rounded-lg bg-amber-500 text-white font-semibold hover:bg-amber-600 transition-all flex items-center gap-2"
+                        title="Régénérer depuis les données du tableau"
+                    >
+                        <RefreshCw className="w-4 h-4" />
+                        Sync tableau → BPMN
+                    </button>
+                )}
 
                 {bpmnXml && (
                     <button
@@ -410,162 +560,61 @@ export default function VoiceProcessPage() {
                 </button>
             </div>
 
+            {/* AVERTISSEMENT ÉDITION */}
+            {isEditingBpmn && showDiagram && (
+                <div className="mb-4 p-4 bg-amber-50 border-l-4 border-amber-500 text-amber-800 rounded">
+                    <div className="flex items-start gap-3">
+                        <Info className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                        <div>
+                            <strong>Attention :</strong> Le diagramme a été modifié visuellement.
+                            Les modifications ne sont pas reflétées dans le tableau ci-dessous.
+                            <br />
+                            <span className="text-sm mt-1 block">
+                                💡 Utilisez "Sync tableau → BPMN" pour régénérer depuis le tableau.
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* DIAGRAMME BPMN */}
             {showDiagram && bpmnXml && (
                 <div className="mb-6">
                     <BPMNViewer
+                        ref={bpmnViewerRef}
                         xml={bpmnXml}
                         height="600px"
                         onClose={() => setShowDiagram(false)}
                         onError={(err) => showError(err)}
+                        onUpdate={handleBpmnUpdate}
                     />
                 </div>
             )}
 
-            {/* TABLEAU ÉDITABLE */}
-            <div className="bg-white rounded-lg shadow-lg overflow-hidden">
-                <div className="bg-gray-800 text-white p-4">
-                    <h2 className="text-xl font-bold flex items-center gap-2">
-                        <FileText className="w-5 h-5" />
-                        Tableau du processus ({data.length} étapes)
-                    </h2>
-                </div>
+            {/* 🆕 SECTION EXPORT WORD */}
+            {showDiagram && bpmnXml && data.length > 0 && (
+                <DocumentExportPanel
+                    data={data}
+                    enrichments={enrichments}
+                    processMetadata={processMetadata}
+                    bpmnXml={bpmnXml}
+                    containerRef={{
+                        current: bpmnViewerRef.current?.getContainerRef() || null
+                    }}
+                    onSuccess={showSuccess}
+                    onError={showError}
+                />
+            )}
 
-                <div className="overflow-x-auto">
-                    <table className="min-w-full border-collapse text-sm">
-                        <thead className="bg-gray-700 text-white">
-                            <tr>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">ID</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Étape</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Type BPMN</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Département</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Acteur</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Condition</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Si Oui</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Si Non</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Outil</th>
-                                <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {data.length === 0 ? (
-                                <tr>
-                                    <td colSpan={10} className="text-center py-12 text-gray-500">
-                                        <div className="flex flex-col items-center gap-3">
-                                            <FileText className="w-12 h-12 text-gray-300" />
-                                            <p className="text-lg font-semibold">Tableau vide</p>
-                                            <p className="text-sm">
-                                                Uploadez une image, enregistrez vocalement ou ajoutez manuellement des lignes
-                                            </p>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ) : (
-                                data.map((row, i) => (
-                                    <tr key={row.id} className="hover:bg-gray-50 transition-colors">
-                                        <td className="border border-gray-300 px-2 py-1 text-center font-mono text-xs bg-gray-100">
-                                            {row.id}
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className="w-full px-2 py-1 border rounded focus:ring-2 focus:ring-blue-400"
-                                                value={row.étape}
-                                                onChange={e => handleChange(i, "étape", e.target.value)}
-                                                placeholder="Nom de l'étape"
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <select
-                                                aria-label="Type BPMN"
-                                                className="w-full px-2 py-1 border rounded focus:ring-2 focus:ring-blue-400"
-                                                value={row.typeBpmn}
-                                                onChange={e => handleChange(i, "typeBpmn", e.target.value)}
-                                            >
-                                                <option value="StartEvent">Start Event</option>
-                                                <option value="Task">Task</option>
-                                                <option value="ExclusiveGateway">Gateway</option>
-                                                <option value="EndEvent">End Event</option>
-                                            </select>
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className="w-full px-2 py-1 border rounded focus:ring-2 focus:ring-blue-400"
-                                                value={row.département}
-                                                onChange={e => handleChange(i, "département", e.target.value)}
-                                                placeholder="Ex: Commercial"
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className="w-full px-2 py-1 border rounded focus:ring-2 focus:ring-blue-400"
-                                                value={row.acteur}
-                                                onChange={e => handleChange(i, "acteur", e.target.value)}
-                                                placeholder="Ex: Vente"
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className={`w-full px-2 py-1 border rounded ${row.typeBpmn !== "ExclusiveGateway" ? 'bg-gray-100' : ''
-                                                    }`}
-                                                value={row.condition}
-                                                onChange={e => handleChange(i, "condition", e.target.value)}
-                                                placeholder={row.typeBpmn === "ExclusiveGateway" ? "Question ?" : "—"}
-                                                disabled={row.typeBpmn !== "ExclusiveGateway"}
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className="w-full px-2 py-1 border rounded focus:ring-2 focus:ring-blue-400"
-                                                value={row.outputOui}
-                                                onChange={e => handleChange(i, "outputOui", e.target.value)}
-                                                placeholder="ID suivant"
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className={`w-full px-2 py-1 border rounded ${row.typeBpmn !== "ExclusiveGateway" ? 'bg-gray-100' : ''
-                                                    }`}
-                                                value={row.outputNon}
-                                                onChange={e => handleChange(i, "outputNon", e.target.value)}
-                                                placeholder={row.typeBpmn === "ExclusiveGateway" ? "ID alternatif" : "—"}
-                                                disabled={row.typeBpmn !== "ExclusiveGateway"}
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1">
-                                            <input
-                                                className="w-full px-2 py-1 border rounded focus:ring-2 focus:ring-blue-400"
-                                                value={row.outil}
-                                                onChange={e => handleChange(i, "outil", e.target.value)}
-                                                placeholder="Ex: CRM"
-                                            />
-                                        </td>
-                                        <td className="border border-gray-300 p-1 text-center">
-                                            <button
-                                                type="button"
-                                                aria-label="Supprimer cette ligne"
-                                                className="text-red-500 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50"
-                                                onClick={() => handleDeleteRow(i)}
-                                            >
-                                                <Trash2 className="w-4 h-4" />
-                                            </button>
-                                        </td>
-                                    </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-
-                <div className="p-4 bg-gray-50 border-t">
-                    <button
-                        onClick={handleAddRow}
-                        className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors font-semibold flex items-center gap-2"
-                    >
-                        <Plus className="w-4 h-4" />
-                        Ajouter une ligne
-                    </button>
-                </div>
-            </div>
+            {/* COMPOSANT TABLE (Table 1 + Table 2 + Modal) */}
+            <Table
+                data={data}
+                enrichments={enrichments}
+                processTitle={processTitle}
+                onDataChange={setData}
+                onEnrichmentsChange={setEnrichments}
+                onShowSuccess={showSuccess}
+            />
         </div>
     );
 }

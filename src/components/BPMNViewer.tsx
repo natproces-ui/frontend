@@ -1,17 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import {
-    X,
-    ZoomIn,
-    ZoomOut,
-    Maximize2,
-    Download,
-    Edit3,
-    Check,
-    XCircle,
-    FileBarChart,
-    MousePointerClick,
-    Lightbulb
-} from "lucide-react";
+// BPMNViewer.tsx - VERSION AVEC EXPORT PNG/SVG + EXPOSED REF
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import { X, ZoomIn, ZoomOut, Maximize2, Download, FileBarChart, Lock, Unlock, Save, Image as ImageIcon, FileImage } from "lucide-react";
+import { BPMN_VIEWER_STYLES } from '@/logic/bpmnStyles';
+import { LANE_COLORS } from '@/logic/bpmnConstants';
 
 interface BPMNViewerProps {
     xml: string;
@@ -19,6 +10,7 @@ interface BPMNViewerProps {
     onClose?: () => void;
     onError?: (error: string) => void;
     onUpdate?: (updatedXml: string) => void;
+    readOnly?: boolean;
 }
 
 declare global {
@@ -27,521 +19,621 @@ declare global {
     }
 }
 
-export default function BPMNViewer({ xml, height = '800px', onClose, onError, onUpdate }: BPMNViewerProps) {
+// 🆕 Interface pour exposer les méthodes au parent
+export interface BPMNViewerHandle {
+    getContainerRef: () => HTMLDivElement | null;
+}
+
+function useBPMNScript(onError?: (error: string) => void) {
+    const [scriptLoaded, setScriptLoaded] = useState(false);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        if (window.BpmnJS) {
+            setScriptLoaded(true);
+            return;
+        }
+
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/bpmn-js@17.11.1/dist/bpmn-modeler.development.js';
+        script.async = true;
+        script.onload = () => setScriptLoaded(true);
+        script.onerror = () => onError?.("Impossible de charger BPMN.js");
+        document.body.appendChild(script);
+
+        return () => script.remove();
+    }, [onError]);
+
+    return scriptLoaded;
+}
+
+function useConnectionInteractions(viewerRef: React.RefObject<any>, editMode: boolean) {
+    useEffect(() => {
+        if (!viewerRef.current || !editMode) return;
+
+        try {
+            const eventBus = viewerRef.current.get('eventBus');
+            const modeling = viewerRef.current.get('modeling');
+
+            const handleConnectionHover = (event: any) => {
+                if (event.element && (event.element.type === 'bpmn:SequenceFlow' || event.element.type === 'bpmn:Association')) {
+                    const gfx = event.gfx;
+                    if (gfx) {
+                        gfx.style.cursor = 'pointer';
+                        const path = gfx.querySelector('path');
+                        if (path) {
+                            path.style.strokeWidth = '6px';
+                        }
+                    }
+                }
+            };
+
+            const handleConnectionLeave = (event: any) => {
+                if (event.element && (event.element.type === 'bpmn:SequenceFlow' || event.element.type === 'bpmn:Association')) {
+                    const gfx = event.gfx;
+                    if (gfx) {
+                        gfx.style.cursor = '';
+                        const path = gfx.querySelector('path');
+                        if (path) {
+                            path.style.strokeWidth = '3px';
+                        }
+                    }
+                }
+            };
+
+            const handleDoubleClick = (event: any) => {
+                if (event.element.type === 'bpmn:SequenceFlow' || event.element.type === 'bpmn:Association') {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    const connection = event.element;
+                    const position = { x: event.x, y: event.y };
+                    const waypoints = connection.waypoints;
+                    let closestSegment = 0;
+                    let minDistance = Infinity;
+
+                    for (let i = 0; i < waypoints.length - 1; i++) {
+                        const start = waypoints[i];
+                        const end = waypoints[i + 1];
+                        const distance = distanceToSegment(position, start, end);
+
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            closestSegment = i;
+                        }
+                    }
+
+                    const newWaypoints = [...waypoints];
+                    newWaypoints.splice(closestSegment + 1, 0, position);
+                    modeling.updateWaypoints(connection, newWaypoints);
+                }
+            };
+
+            eventBus.on('element.hover', handleConnectionHover);
+            eventBus.on('element.out', handleConnectionLeave);
+            eventBus.on('element.dblclick', handleDoubleClick);
+
+            return () => {
+                eventBus.off('element.hover', handleConnectionHover);
+                eventBus.off('element.out', handleConnectionLeave);
+                eventBus.off('element.dblclick', handleDoubleClick);
+            };
+        } catch (error) {
+            console.error('Erreur configuration interactions:', error);
+        }
+    }, [viewerRef, editMode]);
+}
+
+function distanceToSegment(point: any, start: any, end: any): number {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared === 0) {
+        return Math.sqrt((point.x - start.x) ** 2 + (point.y - start.y) ** 2);
+    }
+
+    const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+    const projectionX = start.x + t * dx;
+    const projectionY = start.y + t * dy;
+
+    return Math.sqrt((point.x - projectionX) ** 2 + (point.y - projectionY) ** 2);
+}
+
+function ZoomControls({ onZoomIn, onZoomOut, onFit }: { onZoomIn: () => void; onZoomOut: () => void; onFit: () => void; }) {
+    return (
+        <div className="flex gap-1 bg-white rounded-lg border border-gray-300 p-1">
+            <button onClick={onZoomIn} className="p-2 rounded hover:bg-gray-100" title="Zoom +">
+                <ZoomIn className="w-4 h-4 text-gray-600" />
+            </button>
+            <button onClick={onZoomOut} className="p-2 rounded hover:bg-gray-100" title="Zoom -">
+                <ZoomOut className="w-4 h-4 text-gray-600" />
+            </button>
+            <button onClick={onFit} className="p-2 rounded hover:bg-gray-100" title="Ajuster">
+                <Maximize2 className="w-4 h-4 text-gray-600" />
+            </button>
+        </div>
+    );
+}
+
+// 🆕 Utilisation de forwardRef pour exposer le containerRef
+const BPMNViewer = forwardRef<BPMNViewerHandle, BPMNViewerProps>(({
+    xml,
+    height = '800px',
+    onClose,
+    onError,
+    onUpdate,
+    readOnly = false
+}, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewerRef = useRef<any>(null);
     const [loading, setLoading] = useState(true);
-    const [scriptLoaded, setScriptLoaded] = useState(false);
-    const [editMode, setEditMode] = useState(false);
-    const [selectedElement, setSelectedElement] = useState<any>(null);
-    const [editText, setEditText] = useState('');
+    const [editMode, setEditMode] = useState(!readOnly);
+    const [hasChanges, setHasChanges] = useState(false);
+    const [exporting, setExporting] = useState(false);
 
-    const laneColors = [
-        { fill: '#E3F2FD', stroke: '#c3ccd4ff', strokeWidth: '4' },
-        { fill: '#FFF3E0', stroke: '#F57C00', strokeWidth: '4' },
-        { fill: '#F3E5F5', stroke: '#7B1FA2', strokeWidth: '4' },
-        { fill: '#E8F5E9', stroke: '#388E3C', strokeWidth: '4' },
-        { fill: '#FCE4EC', stroke: '#C2185B', strokeWidth: '4' },
-        { fill: '#FFFDE7', stroke: '#F9A825', strokeWidth: '4' },
-    ];
+    const scriptLoaded = useBPMNScript(onError);
+    useConnectionInteractions(viewerRef, editMode);
+
+    // 🆕 Exposer le containerRef au parent
+    useImperativeHandle(ref, () => ({
+        getContainerRef: () => containerRef.current
+    }));
 
     useEffect(() => {
-        if (typeof window !== 'undefined' && !window.BpmnJS && !scriptLoaded) {
-            const script = document.createElement('script');
-            script.src = 'https://unpkg.com/bpmn-js@17.11.1/dist/bpmn-modeler.development.js';
-            script.async = true;
+        if (!scriptLoaded || !containerRef.current || viewerRef.current) return;
 
-            script.onload = () => {
-                setScriptLoaded(true);
-            };
+        try {
+            viewerRef.current = new window.BpmnJS({
+                container: containerRef.current,
+                height,
+                keyboard: { bindTo: document },
+                textRenderer: {
+                    defaultStyle: {
+                        fontFamily: 'Arial, sans-serif',
+                        fontWeight: '600',
+                        fontSize: '16px',
+                        lineHeight: 1.3
+                    },
+                    externalStyle: {
+                        fontSize: '16px',
+                        lineHeight: 1.3
+                    }
+                }
+            });
 
-            script.onerror = () => {
-                onError?.("Impossible de charger la bibliothèque BPMN");
-                setLoading(false);
-            };
+            const eventBus = viewerRef.current.get('eventBus');
+            ['elements.changed', 'element.updateLabel', 'connection.reconnect', 'shape.move.end', 'connection.updateWaypoints'].forEach(event => {
+                eventBus.on(event, () => setHasChanges(true));
+            });
 
-            document.body.appendChild(script);
-        } else if (window.BpmnJS) {
-            setScriptLoaded(true);
+            setLoading(false);
+        } catch (error) {
+            onError?.("Erreur initialisation viewer");
+            setLoading(false);
         }
-    }, [scriptLoaded, onError]);
 
-    useEffect(() => {
-        if (scriptLoaded && containerRef.current && !viewerRef.current) {
-            try {
-                viewerRef.current = new window.BpmnJS({
-                    container: containerRef.current,
-                    height: height
-                });
-                setLoading(false);
-            } catch (error) {
-                console.error('Erreur initialisation viewer:', error);
-                onError?.("Erreur lors de l'initialisation du viewer");
-                setLoading(false);
-            }
-        }
+        return () => {
+            viewerRef.current?.destroy();
+            viewerRef.current = null;
+        };
     }, [scriptLoaded, height, onError]);
 
-    useEffect(() => {
-        if (viewerRef.current && xml && !loading) {
-            displayDiagram(xml);
-        }
-    }, [xml, loading]);
+    const applyLaneColors = useCallback(() => {
+        if (!containerRef.current) return;
 
-    const displayDiagram = async (xmlContent: string) => {
+        const container = containerRef.current;
+
+        const applyColors = () => {
+            const laneElements = Array.from(
+                container.querySelectorAll('[data-element-id^="Lane_"]')
+            ).sort((a, b) => {
+                const aRect = a.querySelector('rect');
+                const bRect = b.querySelector('rect');
+                const aX = aRect ? parseFloat(aRect.getAttribute('x') || '0') : 0;
+                const bX = bRect ? parseFloat(bRect.getAttribute('x') || '0') : 0;
+                return aX - bX;
+            });
+
+            laneElements.forEach((lane, index) => {
+                const laneId = lane.getAttribute('data-element-id');
+                if (!laneId) return;
+
+                const color = LANE_COLORS[index % LANE_COLORS.length];
+                const laneRect = lane.querySelector('rect');
+                const laneLabel = lane.querySelector('.djs-label');
+
+                if (!laneRect) return;
+
+                const existingHeader = lane.querySelector('.lane-header-custom');
+                if (existingHeader) {
+                    existingHeader.remove();
+                }
+
+                const headerRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                headerRect.classList.add('lane-header-custom');
+
+                const laneX = parseFloat(laneRect.getAttribute('x') || '0');
+                const laneY = parseFloat(laneRect.getAttribute('y') || '0');
+                const laneWidth = parseFloat(laneRect.getAttribute('width') || '0');
+
+                headerRect.setAttribute('x', laneX.toString());
+                headerRect.setAttribute('y', laneY.toString());
+                headerRect.setAttribute('width', laneWidth.toString());
+                headerRect.setAttribute('height', '100');
+                headerRect.setAttribute('fill', color.stroke);
+                headerRect.setAttribute('opacity', '0.95');
+                headerRect.style.pointerEvents = 'none';
+
+                lane.insertBefore(headerRect, lane.firstChild);
+
+                if (laneLabel) {
+                    const textElements = laneLabel.querySelectorAll('text, tspan');
+                    textElements.forEach((text) => {
+                        (text as SVGElement).setAttribute('fill', '#ffffff');
+                        (text as SVGElement).style.fontWeight = '700';
+                        (text as SVGElement).style.fontSize = '18px';
+                    });
+                }
+            });
+
+            console.log('✅ Couleurs des lanes appliquées');
+        };
+
+        const svgContainer = container.querySelector('.djs-container svg');
+
+        if (!svgContainer) {
+            setTimeout(applyColors, 100);
+            return;
+        }
+
+        const observer = new MutationObserver((mutations, obs) => {
+            const lanes = container.querySelectorAll('[data-element-id^="Lane_"]');
+
+            if (lanes.length > 0) {
+                applyColors();
+                obs.disconnect();
+            }
+        });
+
+        observer.observe(svgContainer, {
+            childList: true,
+            subtree: true
+        });
+
+        setTimeout(() => {
+            observer.disconnect();
+            applyColors();
+        }, 500);
+
+    }, []);
+
+    const displayDiagram = useCallback(async (xmlContent: string) => {
         if (!viewerRef.current) return;
 
         try {
             setLoading(true);
             await viewerRef.current.importXML(xmlContent);
-
-            const canvas = viewerRef.current.get('canvas');
-            canvas.zoom('fit-viewport');
+            viewerRef.current.get('canvas').zoom('fit-viewport');
 
             applyLaneColors();
 
-            if (editMode) {
-                setupEditMode();
-            }
-
-            setTimeout(() => {
-                if (containerRef.current) {
-                    const canvas = viewerRef.current.get('canvas');
-                    canvas.zoom(canvas.zoom());
-                }
-            }, 100);
-
             setLoading(false);
+            setHasChanges(false);
         } catch (error: any) {
-            console.error('Erreur lors du rendu BPMN:', error);
-            onError?.(`Erreur lors de l'affichage: ${error.message}`);
+            console.error('Erreur rendu BPMN:', error);
+            onError?.(`Erreur: ${error.message}`);
             setLoading(false);
         }
-    };
+    }, [onError, applyLaneColors]);
 
-    const applyLaneColors = () => {
-        if (!containerRef.current) return;
-
-        try {
-            const elementRegistry = viewerRef.current.get('elementRegistry');
-            const allElements = elementRegistry.getAll();
-
-            const lanes = allElements.filter((e: any) => e.type === 'bpmn:Lane');
-            lanes.forEach((element: any, index: number) => {
-                const gfx = elementRegistry.getGraphics(element);
-                if (gfx) {
-                    const rect = gfx.querySelector('rect');
-                    if (rect) {
-                        const colorScheme = laneColors[index % laneColors.length];
-                        rect.style.fill = colorScheme.fill;
-                        rect.style.fillOpacity = '0.9';
-                        rect.style.stroke = colorScheme.stroke;
-                        rect.style.strokeWidth = colorScheme.strokeWidth;
-                    }
-                }
-            });
-
-            const tasks = allElements.filter((e: any) =>
-                e.type === 'bpmn:Task' || e.type === 'bpmn:UserTask'
-            );
-
-            tasks.forEach((element: any) => {
-                const gfx = elementRegistry.getGraphics(element);
-                if (gfx) {
-                    const rect = gfx.querySelector('rect');
-                    if (rect) {
-                        const taskName = element.businessObject?.name?.toLowerCase() || '';
-                        let color = { fill: '#EFF6FF', stroke: '#2563EB' };
-
-                        if (taskName.includes('automatique') || taskName.includes('service') || taskName.includes('système')) {
-                            color = { fill: '#FEF9C3', stroke: '#CA8A04' };
-                        } else if (taskName.includes('envoyer') || taskName.includes('notifier') || taskName.includes('email')) {
-                            color = { fill: '#FCE7F3', stroke: '#DB2777' };
-                        } else if (taskName.includes('recevoir') || taskName.includes('attendre')) {
-                            color = { fill: '#E0E7FF', stroke: '#4F46E5' };
-                        } else if (taskName.includes('manuel') || taskName.includes('papier')) {
-                            color = { fill: '#FED7AA', stroke: '#EA580C' };
-                        } else if (taskName.includes('règle') || taskName.includes('décision') || taskName.includes('calcul')) {
-                            color = { fill: '#F3E8FF', stroke: '#9333EA' };
-                        } else if (taskName.includes('script') || taskName.includes('code')) {
-                            color = { fill: '#D1FAE5', stroke: '#059669' };
-                        }
-
-                        rect.style.fill = color.fill;
-                        rect.style.stroke = color.stroke;
-                        rect.style.strokeWidth = '4px';
-                    }
-                }
-            });
-        } catch (error) {
-            console.log('Erreur application des couleurs:', error);
+    useEffect(() => {
+        if (viewerRef.current && xml && !loading) {
+            displayDiagram(xml);
         }
-    };
+    }, [xml, loading, displayDiagram]);
 
-    const setupEditMode = () => {
-        if (!viewerRef.current) return;
-
-        try {
-            const eventBus = viewerRef.current.get('eventBus');
-
-            eventBus.on('element.click', (event: any) => {
-                const element = event.element;
-
-                if (element.type === 'bpmn:Task' ||
-                    element.type === 'bpmn:UserTask' ||
-                    element.type === 'bpmn:Lane' ||
-                    element.type === 'bpmn:ExclusiveGateway' ||
-                    element.type === 'bpmn:StartEvent' ||
-                    element.type === 'bpmn:EndEvent') {
-
-                    setSelectedElement(element);
-                    setEditText(element.businessObject.name || '');
-                }
-            });
-        } catch (error) {
-            console.error('Erreur setup edit mode:', error);
-        }
-    };
-
-    const toggleEditMode = () => {
+    const toggleEditMode = useCallback(() => {
+        if (readOnly) return;
         const newMode = !editMode;
         setEditMode(newMode);
 
-        if (newMode) {
-            setupEditMode();
-        } else {
-            setSelectedElement(null);
-            setEditText('');
+        if (containerRef.current) {
+            const container = containerRef.current;
+            container.classList.remove('bpmn-view-only', 'bpmn-editable');
+            container.classList.add(newMode ? 'bpmn-editable' : 'bpmn-view-only');
         }
-    };
+    }, [editMode, readOnly]);
 
-    const saveTextEdit = async () => {
-        if (!selectedElement || !viewerRef.current || !editText.trim()) return;
+    const saveChanges = useCallback(async () => {
+        if (!viewerRef.current || !onUpdate) return;
 
         try {
-            const modeling = viewerRef.current.get('modeling');
+            const { xml: updatedXml } = await viewerRef.current.saveXML({ format: true });
+            onUpdate(updatedXml);
+            setHasChanges(false);
+            alert('✅ Modifications sauvegardées !');
+        } catch (error) {
+            console.error('Erreur sauvegarde:', error);
+            onError?.("Erreur lors de la sauvegarde");
+        }
+    }, [onUpdate, onError]);
 
-            modeling.updateProperties(selectedElement, {
-                name: editText.trim()
+    const downloadPNG = useCallback(async () => {
+        if (!containerRef.current) {
+            onError?.("Conteneur introuvable");
+            return;
+        }
+
+        setExporting(true);
+
+        try {
+            const html2canvas = (await import('html2canvas')).default;
+            const svgContainer = containerRef.current.querySelector('.djs-container');
+
+            if (!svgContainer) {
+                onError?.("SVG introuvable");
+                setExporting(false);
+                return;
+            }
+
+            const editElements = svgContainer.querySelectorAll(`
+                .djs-bendpoint,
+                .djs-segment-dragger,
+                .djs-connection circle:not([class*="marker"]),
+                .djs-waypoint-move-handle,
+                .djs-connect-handle,
+                .djs-resize-handle,
+                .djs-context-pad,
+                .djs-outline,
+                .djs-drag-group,
+                .djs-dragger,
+                .djs-visual-changed,
+                .djs-attach-support
+            `);
+
+            const originalDisplays: string[] = [];
+            editElements.forEach(el => {
+                originalDisplays.push((el as HTMLElement).style.display);
+                (el as HTMLElement).style.display = 'none';
             });
 
-            const canvas = viewerRef.current.get('canvas');
-            const elementRegistry = viewerRef.current.get('elementRegistry');
-            const graphicsFactory = viewerRef.current.get('graphicsFactory');
+            await new Promise(resolve => setTimeout(resolve, 150));
 
-            const gfx = elementRegistry.getGraphics(selectedElement);
-            if (gfx) {
-                graphicsFactory.update('shape', selectedElement, gfx);
+            const canvas = await html2canvas(svgContainer as HTMLElement, {
+                backgroundColor: '#ffffff',
+                scale: 3,
+                logging: false,
+                useCORS: true,
+                allowTaint: true,
+                imageTimeout: 0
+            });
+
+            editElements.forEach((el, index) => {
+                (el as HTMLElement).style.display = originalDisplays[index];
+            });
+
+            canvas.toBlob((blob) => {
+                if (blob) {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `diagram-${Date.now()}.png`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+
+                    alert('✅ PNG téléchargé avec succès !');
+                } else {
+                    onError?.("Erreur lors de la création du PNG");
+                }
+                setExporting(false);
+            }, 'image/png', 1.0);
+
+        } catch (error: any) {
+            console.error('Erreur export PNG:', error);
+            onError?.(`Erreur lors de l'export PNG: ${error.message}`);
+            setExporting(false);
+
+            const svgContainer = containerRef.current?.querySelector('.djs-container');
+            if (svgContainer) {
+                const editElements = svgContainer.querySelectorAll(`
+                    .djs-bendpoint,
+                    .djs-segment-dragger,
+                    .djs-connection circle:not([class*="marker"]),
+                    .djs-waypoint-move-handle,
+                    .djs-connect-handle,
+                    .djs-resize-handle,
+                    .djs-context-pad,
+                    .djs-outline
+                `);
+                editElements.forEach(el => {
+                    (el as HTMLElement).style.display = '';
+                });
             }
-
-            if (onUpdate) {
-                const { xml: updatedXml } = await viewerRef.current.saveXML({ format: true });
-                onUpdate(updatedXml);
-            }
-
-            alert(`✅ "${selectedElement.type.replace('bpmn:', '')}" mis à jour avec succès!`);
-
-            setSelectedElement(null);
-            setEditText('');
-        } catch (error) {
-            console.error('Erreur lors de la sauvegarde:', error);
-            onError?.("Erreur lors de la sauvegarde des modifications");
         }
-    };
+    }, [onError]);
 
-    const cancelEdit = () => {
-        setSelectedElement(null);
-        setEditText('');
-    };
-
-    const handleZoomIn = () => {
-        if (viewerRef.current) {
-            const canvas = viewerRef.current.get('canvas');
-            canvas.zoom(canvas.zoom() + 0.1);
+    const downloadSVG = useCallback(async () => {
+        if (!containerRef.current) {
+            onError?.("Conteneur introuvable");
+            return;
         }
-    };
 
-    const handleZoomOut = () => {
-        if (viewerRef.current) {
-            const canvas = viewerRef.current.get('canvas');
-            canvas.zoom(canvas.zoom() - 0.1);
-        }
-    };
-
-    const handleZoomReset = () => {
-        if (viewerRef.current) {
-            const canvas = viewerRef.current.get('canvas');
-            canvas.zoom('fit-viewport');
-        }
-    };
-
-    const handleDownloadSVG = async () => {
-        if (!viewerRef.current) return;
+        setExporting(true);
 
         try {
-            const { svg } = await viewerRef.current.saveSVG();
-            const blob = new Blob([svg], { type: 'image/svg+xml' });
+            const svgElement = containerRef.current.querySelector('.djs-container svg');
+
+            if (!svgElement) {
+                onError?.("SVG introuvable");
+                setExporting(false);
+                return;
+            }
+
+            const clonedSvg = svgElement.cloneNode(true) as SVGElement;
+
+            const editElementsToRemove = clonedSvg.querySelectorAll(`
+                .djs-bendpoint,
+                .djs-segment-dragger,
+                .djs-connection circle:not([class*="marker"]),
+                .djs-waypoint-move-handle,
+                .djs-connect-handle,
+                .djs-resize-handle,
+                .djs-context-pad,
+                .djs-outline,
+                .djs-drag-group,
+                .djs-dragger
+            `);
+
+            editElementsToRemove.forEach(el => el.remove());
+
+            const styleElement = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+            styleElement.textContent = BPMN_VIEWER_STYLES;
+            clonedSvg.insertBefore(styleElement, clonedSvg.firstChild);
+
+            const applyComputedStyles = (element: Element) => {
+                const computed = window.getComputedStyle(element);
+
+                const criticalProps: Array<{ css: keyof CSSStyleDeclaration; svg: string }> = [
+                    { css: 'fill', svg: 'fill' },
+                    { css: 'stroke', svg: 'stroke' },
+                    { css: 'strokeWidth', svg: 'stroke-width' },
+                    { css: 'strokeDasharray', svg: 'stroke-dasharray' },
+                    { css: 'opacity', svg: 'opacity' },
+                    { css: 'fontFamily', svg: 'font-family' },
+                    { css: 'fontSize', svg: 'font-size' },
+                    { css: 'fontWeight', svg: 'font-weight' },
+                ];
+
+                criticalProps.forEach(({ css, svg }) => {
+                    const value = computed[css] as string;
+                    if (value && value !== 'none' && value !== '' && value !== 'normal') {
+                        element.setAttribute(svg, value);
+                    }
+                });
+
+                Array.from(element.children).forEach(child => applyComputedStyles(child));
+            };
+
+            applyComputedStyles(clonedSvg);
+
+            const bbox = (svgElement as SVGSVGElement).getBBox();
+            clonedSvg.setAttribute('viewBox', `${bbox.x - 20} ${bbox.y - 20} ${bbox.width + 40} ${bbox.height + 40}`);
+            clonedSvg.setAttribute('width', (bbox.width + 40).toString());
+            clonedSvg.setAttribute('height', (bbox.height + 40).toString());
+            clonedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+            const serializer = new XMLSerializer();
+            let svgString = serializer.serializeToString(clonedSvg);
+
+            svgString = '<?xml version="1.0" encoding="UTF-8"?>\n' + svgString;
+
+            const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'process-diagram.svg';
+            a.download = `diagram-${Date.now()}.svg`;
+            document.body.appendChild(a);
             a.click();
+            document.body.removeChild(a);
             URL.revokeObjectURL(url);
-        } catch (error) {
+
+            alert('✅ SVG téléchargé avec succès !');
+            setExporting(false);
+
+        } catch (error: any) {
             console.error('Erreur export SVG:', error);
-            onError?.("Erreur lors de l'export SVG");
+            onError?.(`Erreur lors de l'export SVG: ${error.message}`);
+            setExporting(false);
         }
-    };
+    }, [onError]);
+
+    const zoom = (delta: number) => viewerRef.current?.get('canvas').zoom(viewerRef.current.get('canvas').zoom() + delta);
+    const fitViewport = () => viewerRef.current?.get('canvas').zoom('fit-viewport');
+
+    useEffect(() => {
+        if (containerRef.current) {
+            const container = containerRef.current;
+            container.classList.remove('bpmn-view-only', 'bpmn-editable');
+            container.classList.add(editMode ? 'bpmn-editable' : 'bpmn-view-only');
+        }
+    }, [editMode]);
 
     return (
-        <div className="bg-white rounded-lg shadow-xl border border-gray-200 font-sans text-sm leading-relaxed text-gray-800">
-            <style>{`
-                @keyframes spin {
-                    to { transform: rotate(360deg); }
-                }
-                
-                .djs-container .djs-element[data-element-id^="Lane_"] rect:first-child {
-                    stroke-width: 4px !important;
-                    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.1));
-                }
-                
-                /* AUGMENTATION DES TAILLES DE POLICE */
-                .djs-container .djs-element .djs-label text {
-                    font-size: 30px !important;
-                    font-weight: 600 !important;
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-                    fill: #111827 !important;
-                }
-                
-                .djs-container .djs-connection .djs-label text {
-                    font-size: 30px !important;
-                    font-weight: 700 !important;
-                    fill: #2563eb !important;
-                    text-shadow: 0 0 4px rgba(255, 255, 255, 0.9);
-                }
-                
-                .djs-container .djs-element[data-element-id^="Lane_"] text {
-                    font-size: 30px !important;
-                    font-weight: 700 !important;
-                    fill: #000000 !important;
-                    letter-spacing: 0.6px !important;
-                }
-                
-                .djs-container .djs-element[data-element-id^="Gateway_"] + .djs-label text {
-                    font-size: 30px !important;
-                    font-weight: 900 !important;
-                    fill: #374151 !important;
-                }
-                
-                .djs-container .djs-element[data-element-id^="Task_"] rect {
-                    stroke-width: 4px !important;
-                    filter: drop-shadow(0 4px 8px rgba(37, 99, 235, 0.25));
-                    rx: 8 !important;
-                }
-                
-                .djs-container .djs-element[data-element-id^="Task_"] .djs-label text {
-                    fill: #111827 !important;
-                    font-weight: 600 !important;
-                    font-size: 30px !important;
-                }
-                
-                .djs-container .djs-element[data-element-id^="Gateway_"] path {
-                    stroke: #f59e0b !important;
-                    stroke-width: 4px !important;
-                    fill: #fffbeb !important;
-                    filter: drop-shadow(0 4px 8px rgba(245, 158, 11, 0.3));
-                }
-                
-                .djs-container .djs-element[data-element-id^="Start_"] circle {
-                    stroke: #10b981 !important;
-                    stroke-width: 4px !important;
-                    fill: #d1fae5 !important;
-                    filter: drop-shadow(0 4px 8px rgba(16, 185, 129, 0.35));
-                }
-                
-                .djs-container .djs-element[data-element-id^="End_"] circle {
-                    stroke: #ef4444 !important;
-                    stroke-width: 5px !important;
-                    fill: #fee2e2 !important;
-                    filter: drop-shadow(0 4px 8px rgba(239, 68, 68, 0.35));
-                }
-                
-                .djs-container .djs-connection path {
-                    stroke: #6b7280 !important;
-                    stroke-width: 3px !important;
-                }
-                
-                .djs-container .djs-connection.selected path {
-                    stroke: #6b7280 !important;
-                    stroke-width: 3px !important;
-                    filter: none !important;
-                }
-                
-                .djs-container .selected .djs-outline {
-                    stroke: #2563eb !important;
-                    stroke-width: 4px !important;
-                    stroke-dasharray: 10, 5 !important;
-                }
-                
-                .djs-container .djs-element:hover rect,
-                .djs-container .djs-element:hover circle,
-                .djs-container .djs-element:hover path {
-                    filter: brightness(1.05) drop-shadow(0 5px 10px rgba(0, 0, 0, 0.2));
-                }
-                
-                .spinner {
-                    animation: spin 1s linear infinite;
-                }
-            `}</style>
+        <div className="bg-white rounded-lg shadow-xl border border-gray-200">
+            <style>{BPMN_VIEWER_STYLES}</style>
 
-            {/* Header */}
-            <div className="flex items-center justify-between p-4 px-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
+            <div className="flex items-center justify-between p-4 px-6 border-b bg-gradient-to-r from-blue-50 to-indigo-50">
                 <div className="flex items-center gap-3">
                     <FileBarChart className="w-6 h-6 text-blue-600" />
                     <h2 className="text-xl font-semibold text-gray-800 m-0">Diagramme BPMN</h2>
+                    {hasChanges && <span className="text-xs bg-orange-100 text-orange-800 px-2 py-1 rounded font-semibold">Modifications non sauvegardées</span>}
                 </div>
 
                 <div className="flex items-center gap-2">
-                    <button
-                        onClick={toggleEditMode}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm border transition-all outline-none ${editMode
-                            ? 'bg-green-500 text-white border-green-500 shadow-md'
-                            : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                            }`}
-                        title={editMode ? "Désactiver le mode édition" : "Activer le mode édition"}
-                    >
-                        <Edit3 className="w-4 h-4" />
-                        {editMode ? 'Édition activée' : 'Éditer'}
-                    </button>
+                    {!readOnly && (<>
+                        <button onClick={toggleEditMode} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm border transition-all ${editMode ? 'bg-green-500 text-white border-green-500 hover:bg-green-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`} title={editMode ? "Passer en mode visualisation" : "Activer le mode édition"}>
+                            {editMode ? (<><Unlock className="w-4 h-4" />Édition active</>) : (<><Lock className="w-4 h-4" />Mode lecture</>)}
+                        </button>
+                        {hasChanges && onUpdate && (<button onClick={saveChanges} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600 font-medium text-sm animate-pulse"><Save className="w-4 h-4" />Sauvegarder</button>)}
+                        <div className="w-px h-6 bg-gray-300 mx-1"></div>
+                    </>)}
+
+                    <ZoomControls onZoomIn={() => zoom(0.1)} onZoomOut={() => zoom(-0.1)} onFit={fitViewport} />
 
                     <div className="w-px h-6 bg-gray-300 mx-1"></div>
 
-                    <div className="flex items-center gap-1 bg-white rounded-lg border border-gray-300 p-1">
-                        <button
-                            onClick={handleZoomIn}
-                            className="p-2 rounded hover:bg-gray-100 transition-colors outline-none"
-                            title="Zoom avant"
-                        >
-                            <ZoomIn className="w-4 h-4 text-gray-600" />
-                        </button>
-                        <button
-                            onClick={handleZoomOut}
-                            className="p-2 rounded hover:bg-gray-100 transition-colors outline-none"
-                            title="Zoom arrière"
-                        >
-                            <ZoomOut className="w-4 h-4 text-gray-600" />
-                        </button>
-                        <button
-                            onClick={handleZoomReset}
-                            className="p-2 rounded hover:bg-gray-100 transition-colors outline-none"
-                            title="Ajuster à la vue"
-                        >
-                            <Maximize2 className="w-4 h-4 text-gray-600" />
-                        </button>
-                    </div>
-
                     <button
-                        onClick={handleDownloadSVG}
-                        className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm bg-blue-600 text-white border border-blue-600 shadow-sm hover:bg-blue-700 transition-colors outline-none"
-                        title="Exporter en SVG"
+                        onClick={downloadPNG}
+                        disabled={exporting}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all"
+                        title="Télécharger en PNG (haute qualité, sans outils d'édition)"
                     >
-                        <Download className="w-4 h-4" />
-                        Exporter
+                        <ImageIcon className="w-4 h-4" />
+                        {exporting ? 'Export...' : 'PNG'}
                     </button>
 
-                    {onClose && (
-                        <>
-                            <div className="w-px h-6 bg-gray-300 mx-1"></div>
-                            <button
-                                onClick={onClose}
-                                className="p-2 rounded-lg hover:bg-gray-100 transition-colors outline-none"
-                                title="Fermer"
-                            >
-                                <X className="w-5 h-5 text-gray-600" />
-                            </button>
-                        </>
-                    )}
+                    <button
+                        onClick={downloadSVG}
+                        disabled={exporting}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all"
+                        title="Télécharger en SVG (vectoriel, sans outils d'édition)"
+                    >
+                        <FileImage className="w-4 h-4" />
+                        {exporting ? 'Export...' : 'SVG'}
+                    </button>
+
+                    {onClose && (<><div className="w-px h-6 bg-gray-300 mx-1"></div><button onClick={onClose} className="p-2 rounded-lg hover:bg-gray-100"><X className="w-5 h-5 text-gray-600" /></button></>)}
                 </div>
             </div>
 
-            {editMode && selectedElement && (
-                <div className="mx-6 mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                    <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                            <Edit3 className="w-5 h-5 text-blue-600" />
-                            <h3 className="font-semibold text-gray-800 m-0">
-                                Édition: {selectedElement.type.replace('bpmn:', '')}
-                            </h3>
+            {editMode && !readOnly && (
+                <div className="mx-6 mt-4 px-4 py-3 bg-blue-50 border border-blue-200 rounded-lg">
+                    <p className="text-sm text-gray-700 m-0"><strong>🎯 Mode édition activé :</strong> Déplacez les éléments (drag & drop). Sur les flèches : <strong>Survolez</strong> pour voir les outils et augmenter l'épaisseur, <strong>double-cliquez</strong> pour ajouter un angle/coin.</p>
+                </div>
+            )}
+
+            <div ref={containerRef} style={{ height, position: 'relative' }} className={`bg-white ${editMode ? 'bpmn-editable' : 'bpmn-view-only'}`}>
+                {(loading || exporting) && (
+                    <div className="absolute inset-0 bg-white/75 flex items-center justify-center z-10">
+                        <div className="text-center">
+                            <svg className="w-12 h-12 text-blue-600 spinner mx-auto mb-2" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <p className="text-sm text-gray-600">
+                                {exporting ? 'Génération de l\'image en cours...' : 'Chargement du diagramme...'}
+                            </p>
                         </div>
-                        <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded font-mono">
-                            {selectedElement.id}
-                        </span>
                     </div>
-
-                    <div className="flex gap-2">
-                        <input
-                            type="text"
-                            value={editText}
-                            onChange={(e) => setEditText(e.target.value)}
-                            className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-                            placeholder="Entrez le nouveau texte..."
-                            onKeyPress={(e) => e.key === 'Enter' && saveTextEdit()}
-                            autoFocus
-                        />
-                        <button
-                            onClick={saveTextEdit}
-                            className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded-lg font-medium text-sm hover:bg-green-600 transition-colors outline-none"
-                        >
-                            <Check className="w-4 h-4" />
-                            Valider
-                        </button>
-                        <button
-                            onClick={cancelEdit}
-                            className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-medium text-sm hover:bg-gray-300 transition-colors outline-none"
-                        >
-                            <XCircle className="w-4 h-4" />
-                            Annuler
-                        </button>
-                    </div>
-
-                    <p className="mt-3 text-sm text-gray-600 flex items-center gap-2 m-0">
-                        <Lightbulb className="w-4 h-4 text-yellow-600" />
-                        <span>Modifiez le texte puis validez ou appuyez sur Entrée</span>
-                    </p>
-                </div>
-            )}
-
-            {editMode && !selectedElement && (
-                <div className="mx-6 mt-4 px-4 py-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                    <p className="text-sm text-gray-700 flex items-center gap-2 m-0">
-                        <MousePointerClick className="w-4 h-4 text-yellow-600" />
-                        <span>
-                            <strong className="font-semibold">Mode édition activé</strong> -
-                            Cliquez sur un élément du diagramme pour modifier son texte
-                        </span>
-                    </p>
-                </div>
-            )}
-
-            {loading && (
-                <div className="flex items-center justify-center p-12" style={{ height }}>
-                    <div className="text-center">
-                        <div className="spinner rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mx-auto mb-4"></div>
-                        <p className="text-gray-600 font-medium m-0">Chargement du diagramme...</p>
-                    </div>
-                </div>
-            )}
-
-            <div className="p-6">
-                <div
-                    ref={containerRef}
-                    className={`border border-gray-300 rounded-lg overflow-hidden bg-gray-50 ${editMode ? 'cursor-pointer' : 'cursor-default'}`}
-                    style={{
-                        height,
-                        display: loading ? 'none' : 'block'
-                    }}
-                />
+                )}
             </div>
         </div>
     );
-}
+});
+
+BPMNViewer.displayName = 'BPMNViewer';
+
+export default BPMNViewer;

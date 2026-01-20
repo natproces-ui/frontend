@@ -193,7 +193,7 @@ export default function ClinicPage() {
     const hasBpmnResults = mode === 'bpmn' && currentStep === 'completed' && bpmnData;
 
     return (
-        <>
+        <div className="clinic-page">
             <script src="https://cdnjs.cloudflare.com/ajax/libs/viz.js/2.1.2/viz.js" async />
             <script src="https://cdnjs.cloudflare.com/ajax/libs/viz.js/2.1.2/full.render.js" async />
 
@@ -424,6 +424,6 @@ export default function ClinicPage() {
                     )}
                 </div>
             </div>
-        </>
+        </div>
     );
 }

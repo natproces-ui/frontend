@@ -1,5 +1,9 @@
+"use client";
+
 import { useState, useRef } from 'react';
 import { Table1Row } from '@/logic/bpmnGenerator';
+import { API_CONFIG } from '@/lib/api-config';
+import { TaskEnrichment } from '@/logic/bpmnTypes';
 import {
     Upload,
     Loader2,
@@ -7,22 +11,34 @@ import {
     Image as ImageIcon,
     Info,
     ChevronDown,
-    ChevronUp
+    ChevronUp,
+    AlertTriangle
+
 } from 'lucide-react';
 
 interface ImageUploadSectionProps {
-    onWorkflowExtracted: (workflow: Table1Row[]) => void;
+    onWorkflowExtracted: (
+        workflow: Table1Row[],
+        title?: string,
+        enrichments?: Map<string, TaskEnrichment>  // 🆕 AJOUTÉ
+    ) => void;
     onError: (message: string) => void;
     onSuccess: (message: string) => void;
+    currentWorkflow?: Table1Row[];
+    onVerificationComplete?: (verificationResult: any) => void;
 }
 
 export default function ImageUploadSection({
     onWorkflowExtracted,
     onError,
-    onSuccess
+    onSuccess,
+    currentWorkflow,
+    onVerificationComplete
 }: ImageUploadSectionProps) {
     const [uploading, setUploading] = useState(false);
+    const [verifying, setVerifying] = useState(false); // ✅ NOUVEAU
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [currentImageData, setCurrentImageData] = useState<File | null>(null); // ✅ NOUVEAU
     const [showGuide, setShowGuide] = useState(true);
     const [dragActive, setDragActive] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -49,6 +65,9 @@ export default function ImageUploadSection({
         reader.onload = (e) => setPreviewUrl(e.target?.result as string);
         reader.readAsDataURL(file);
 
+        // ✅ Sauvegarder le fichier pour la vérification ultérieure
+        setCurrentImageData(file);
+
         await uploadAndAnalyze(file);
     };
 
@@ -58,7 +77,9 @@ export default function ImageUploadSection({
             const formData = new FormData();
             formData.append('file', file);
 
-            const response = await fetch('http://localhost:8002/api/img-to-bpmn/analyze', {
+            const url = API_CONFIG.getFullUrl(API_CONFIG.endpoints.imgToBpmnAnalyze);
+
+            const response = await fetch(url, {
                 method: 'POST',
                 body: formData
             });
@@ -71,16 +92,70 @@ export default function ImageUploadSection({
             const result = await response.json();
 
             if (result.success && result.workflow) {
-                onWorkflowExtracted(result.workflow);
-                onSuccess(`${result.steps_count} étapes extraites avec succès.`);
+                const title = result.title || "Processus extrait";
+
+                // 🆕 Convertir enrichments objet → Map
+                const enrichmentsMap = new Map<string, TaskEnrichment>();
+                if (result.enrichments) {
+                    Object.entries(result.enrichments).forEach(([id, enr]: [string, any]) => {
+                        enrichmentsMap.set(id, enr);
+                    });
+                }
+
+                onWorkflowExtracted(result.workflow, title, enrichmentsMap);  // ✅ Passe les enrichissements
+
+                const enrichCount = enrichmentsMap.size;
+                onSuccess(`${result.steps_count} étapes extraites, ${enrichCount} enrichies.`);
             } else {
                 throw new Error('Format de réponse invalide.');
             }
         } catch (error: any) {
             onError(error.message || 'Erreur lors de l\'analyse de l\'image.');
             setPreviewUrl(null);
+            setCurrentImageData(null);
         } finally {
             setUploading(false);
+        }
+    };
+    // ✅ NOUVELLE FONCTION : Vérifier l'extraction
+    const handleVerifyExtraction = async () => {
+        if (!currentImageData || !currentWorkflow || currentWorkflow.length === 0) {
+            onError('Impossible de vérifier : pas d\'image ou de workflow disponible.');
+            return;
+        }
+
+        setVerifying(true);
+        try {
+            const formData = new FormData();
+            formData.append('file', currentImageData);
+            formData.append('workflow', JSON.stringify(currentWorkflow));
+
+            const url = API_CONFIG.getFullUrl(API_CONFIG.endpoints.imgToBpmnVerify);
+
+            const response = await fetch(url, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Erreur lors de la vérification.');
+            }
+
+            const result = await response.json();
+
+            if (result.success && result.verification_result) {
+                onSuccess('Analyse d\'erreurs terminée.');
+                if (onVerificationComplete) {
+                    onVerificationComplete(result.verification_result);
+                }
+            } else {
+                throw new Error('Format de réponse invalide.');
+            }
+        } catch (error: any) {
+            onError(error.message || 'Erreur lors de la vérification.');
+        } finally {
+            setVerifying(false);
         }
     };
 
@@ -110,11 +185,16 @@ export default function ImageUploadSection({
 
     const handleClearPreview = () => {
         setPreviewUrl(null);
+        setCurrentImageData(null);
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
+    // ✅ Calculer si la vérification est disponible
+    const canVerify = currentImageData && currentWorkflow && currentWorkflow.length > 0;
+
     return (
         <div className="mb-6 bg-gradient-to-br from-indigo-50 to-purple-50 border-2 border-indigo-200 rounded-lg p-6">
+
             {/* Header */}
             <div className="flex items-center gap-3 mb-4">
                 <ImageIcon className="w-7 h-7 text-indigo-700" />
@@ -123,12 +203,12 @@ export default function ImageUploadSection({
                         Analyser une image de processus
                     </h2>
                     <p className="text-sm text-indigo-700">
-                        Uploadez ou déposez une capture d’écran de votre workflow pour remplir automatiquement le tableau.
+                        Uploadez ou déposez une capture d'écran de votre workflow pour remplir automatiquement le tableau.
                     </p>
                 </div>
             </div>
 
-            {/* Zone d’upload + drag & drop */}
+            {/* Upload zone */}
             <div
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -165,20 +245,45 @@ export default function ImageUploadSection({
                 )}
             </div>
 
-            {/* Prévisualisation */}
+            {/* Preview */}
             {previewUrl && (
                 <div className="bg-white rounded-lg p-4 border-2 border-indigo-200 mt-4">
                     <div className="flex items-center justify-between mb-2">
                         <p className="text-sm font-semibold text-indigo-900 flex items-center gap-2">
                             <ImageIcon className="w-4 h-4" /> Image uploadée
                         </p>
-                        <button
-                            onClick={handleClearPreview}
-                            className="flex items-center gap-1 text-red-600 border border-red-300 px-2 py-1 rounded-md hover:bg-red-50 text-sm"
-                        >
-                            <Trash2 className="w-4 h-4" />
-                            Effacer
-                        </button>
+                        <div className="flex gap-2">
+                            {/* ✅ NOUVEAU BOUTON : Analyser les erreurs */}
+                            {canVerify && (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleVerifyExtraction();
+                                    }}
+                                    disabled={verifying}
+                                    className="flex items-center gap-1 text-orange-600 border-2 border-orange-400 px-3 py-1 rounded-md hover:bg-orange-50 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                                >
+                                    {verifying ? (
+                                        <>
+                                            <Loader2 className="w-4 h-4 animate-spin" />
+                                            Vérification...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <AlertTriangle className="w-4 h-4" />
+                                            Analyser les erreurs
+                                        </>
+                                    )}
+                                </button>
+                            )}
+                            <button
+                                onClick={handleClearPreview}
+                                className="flex items-center gap-1 text-red-600 border border-red-300 px-2 py-1 rounded-md hover:bg-red-50 text-sm"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                                Effacer
+                            </button>
+                        </div>
                     </div>
                     <img
                         src={previewUrl}
@@ -188,7 +293,7 @@ export default function ImageUploadSection({
                 </div>
             )}
 
-            {/* Guide / Instructions */}
+            {/* Guide */}
             <div className="bg-white rounded-lg border-2 border-indigo-100 overflow-hidden mt-4">
                 <button
                     onClick={() => setShowGuide((prev) => !prev)}
@@ -196,7 +301,7 @@ export default function ImageUploadSection({
                 >
                     <span className="flex items-center gap-2">
                         <Info className="w-5 h-5" />
-                        Guide d’utilisation
+                        Guide d'utilisation
                     </span>
                     {showGuide ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
                 </button>
@@ -208,7 +313,8 @@ export default function ImageUploadSection({
                             <li>• Formats supportés : PNG, JPG, WebP (max 10MB).</li>
                             <li>• Assurez-vous que les textes sont bien lisibles.</li>
                             <li>• Les swimlanes aident à identifier les acteurs ou départements.</li>
-                            <li>• L’IA reconnaît les formes BPMN : cercles (événements), rectangles (tâches), losanges (décisions).</li>
+                            <li>• L'IA reconnaît les formes BPMN : cercles (événements), rectangles (tâches), losanges (décisions).</li>
+                            <li>• <strong>🆕 Cliquez sur "Analyser les erreurs"</strong> après l'extraction pour vérifier la qualité.</li>
                         </ul>
                     </div>
                 )}
